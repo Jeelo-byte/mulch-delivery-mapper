@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAppState, useAppDispatch } from '@/src/lib/store';
 import {
     DragDropContext,
@@ -27,12 +27,15 @@ import {
     Download,
     FileText,
     ArrowUpDown,
+    RefreshCw,
+    Timer,
 } from 'lucide-react';
 import { optimizeRoute, getRouteDirections } from '@/src/lib/route-optimizer';
 import { smartAutoGenerate } from '@/src/lib/auto-route-generator';
 import { geocodeAddress } from '@/src/lib/geocoder';
 import { exportRoutesToCSV, downloadCSV, exportRoutesToPDF } from '@/src/lib/route-export';
-import type { MulchType, DeliveryStop } from '@/src/lib/types';
+import { computeRouteETAs } from '@/src/lib/eta-calculator';
+import type { MulchType, DeliveryStop, Route } from '@/src/lib/types';
 
 const MULCH_TYPES: MulchType[] = ['Black', 'Aromatic Cedar', 'Fine Shredded Hardwood'];
 
@@ -74,6 +77,7 @@ export function RouteEditor() {
     const state = useAppState();
     const dispatch = useAppDispatch();
     const [optimizing, setOptimizing] = useState<string | null>(null);
+    const [bulkOptimizing, setBulkOptimizing] = useState<'distance' | 'duration' | 'calc' | null>(null);
     const [showAutoGen, setShowAutoGen] = useState(false);
     const [showCreateRoute, setShowCreateRoute] = useState(false);
     const [autoErrors, setAutoErrors] = useState<string[]>([]);
@@ -119,7 +123,6 @@ export function RouteEditor() {
         .map(id => state.stops[id])
         .filter(s => {
             if (!s || s.isDisabled) return false;
-            // Mode-specific filtering
             if (state.activeServiceMode === 'mulch') {
                 if (s.routeId) return false;
                 if (!s.mulchOrders || s.mulchOrders.length === 0) return false;
@@ -143,6 +146,20 @@ export function RouteEditor() {
         return allRoutes;
     }, [allRoutes, sortBy, state.vehicles]);
 
+    // Pre-compute ETA maps for all routes at component level (avoids hooks-in-render violation)
+    const routeETAMaps = useMemo(() => {
+        const maps: Record<string, Map<string, ReturnType<typeof computeRouteETAs>[0]>> = {};
+        for (const route of allRoutes) {
+            if (route.legStats) {
+                maps[route.id] = new Map(computeRouteETAs(route, state).map(e => [e.stopId, e]));
+            } else {
+                maps[route.id] = new Map();
+            }
+        }
+        return maps;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [allRoutes.map(r => r.id + (r.legStats?.length ?? 0)).join(','), state.settings]);
+
     // Group routes by vehicle for section headers
     const routesByVehicle = useMemo(() => {
         if (sortBy !== 'vehicle') return null;
@@ -159,6 +176,42 @@ export function RouteEditor() {
         }
         return groups;
     }, [sortedRoutes, sortBy, state.vehicles]);
+
+    // ── Delivery-first dependency warning ───────────────────────────────────────
+    // Find stops that appear in both a delivery route and spreading route, and
+    // where the spreading ETA is BEFORE the delivery ETA.
+    const dependencyWarnings = useMemo(() => {
+        if (state.activeServiceMode !== 'spreading') return [];
+        const warnings: string[] = [];
+
+        const spreadingRoutes = Object.values(state.routes).filter(r => r.serviceMode === 'spreading');
+        const deliveryRoutes = Object.values(state.routes).filter(r => r.serviceMode === 'mulch');
+
+        // Build delivery ETAs: stopId → arrival minutes
+        const deliveryETA = new Map<string, number>();
+        for (const dRoute of deliveryRoutes) {
+            for (const eta of computeRouteETAs(dRoute, state)) {
+                deliveryETA.set(eta.stopId, eta.cumulativeMins);
+            }
+        }
+
+        for (const sRoute of spreadingRoutes) {
+            const sVehicle = state.vehicles[sRoute.vehicleId];
+            const sVehicleName = sVehicle?.name || 'Unknown Vehicle';
+            const spreadingETAs = computeRouteETAs(sRoute, state);
+            for (const eta of spreadingETAs) {
+                const deliveryMins = deliveryETA.get(eta.stopId);
+                if (deliveryMins !== undefined && eta.cumulativeMins < deliveryMins) {
+                    const stop = state.stops[eta.stopId];
+                    const stopNum = eta.index + 1;
+                    warnings.push(
+                        `Stop #${stopNum} — ${stop?.recipientName || eta.stopId} | Route: "${sRoute.name}" (${sVehicleName}) | Spreading ETA ${eta.etaStr} is BEFORE delivery arrival`
+                    );
+                }
+            }
+        }
+        return warnings;
+    }, [state, state.activeServiceMode]);
 
     const handleDragEnd = (result: DropResult) => {
         const { source, destination, draggableId } = result;
@@ -179,6 +232,45 @@ export function RouteEditor() {
             });
         }
     };
+
+    const fetchRouteStats = useCallback(async (routeId: string, stopIds: string[]) => {
+        const depotCoords = state.settings.depotCoords;
+        const validStops = stopIds.map(id => state.stops[id]).filter(s => s?.coordinates);
+
+        const coordsArr: string[] = [];
+        if (depotCoords) coordsArr.push(`${depotCoords[0]},${depotCoords[1]}`);
+        validStops.slice(0, 23).forEach(s => coordsArr.push(`${s.coordinates![0]},${s.coordinates![1]}`));
+        if (depotCoords) coordsArr.push(`${depotCoords[0]},${depotCoords[1]}`); // end at depot
+
+        if (coordsArr.length < 2) return;
+        const coordsStr = coordsArr.join(';');
+
+        try {
+            const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
+            // overview=full returns geometry; overview=false only returns stats
+            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${coordsStr}?access_token=${token}&geometries=geojson&overview=full`;
+            const resp = await fetch(url);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.routes?.[0]) {
+                const distanceMiles = data.routes[0].distance * 0.000621371;
+                const durationMinutes = data.routes[0].duration / 60;
+
+                const legStats = data.routes[0].legs.map((leg: { distance: number; duration: number }) => ({
+                    distanceMiles: leg.distance * 0.000621371,
+                    durationMinutes: leg.duration / 60
+                }));
+
+                dispatch({ type: 'SET_ROUTE_STATS', payload: { routeId, distanceMiles, durationMinutes, legStats } });
+
+                // Also dispatch geometry so the route line appears on the map
+                const geometry = data.routes[0].geometry as GeoJSON.LineString | null;
+                if (geometry) {
+                    dispatch({ type: 'SET_ROUTE_GEOMETRY', payload: { routeId, geometry } });
+                }
+            }
+        } catch { }
+    }, [state.settings.depotCoords, state.stops, dispatch]);
 
     const handleOptimize = async (routeId: string, mode: 'distance' | 'duration') => {
         const route = state.routes[routeId];
@@ -201,41 +293,41 @@ export function RouteEditor() {
         setOptimizing(null);
     };
 
-    const fetchRouteStats = async (routeId: string, stopIds: string[]) => {
-        const route = state.routes[routeId];
-        const depotCoords = state.settings.depotCoords;
-        const validStops = stopIds.map(id => state.stops[id]).filter(s => s?.coordinates);
-
-        const coordsArr: string[] = [];
-        if (depotCoords) coordsArr.push(`${depotCoords[0]},${depotCoords[1]}`);
-        validStops.slice(0, 23).forEach(s => coordsArr.push(`${s.coordinates![0]},${s.coordinates![1]}`));
-
-        if (coordsArr.length < 2) return;
-        const coordsStr = coordsArr.join(';');
-
-        try {
-            const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
-            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${coordsStr}?access_token=${token}&overview=false`;
-            const resp = await fetch(url);
-            if (!resp.ok) return;
-            const data = await resp.json();
-            if (data.routes?.[0]) {
-                const distanceMiles = data.routes[0].distance * 0.000621371;
-                const durationMinutes = data.routes[0].duration / 60;
-
-                const legStats = data.routes[0].legs.map((leg: { distance: number; duration: number }) => ({
-                    distanceMiles: leg.distance * 0.000621371,
-                    durationMinutes: leg.duration / 60
-                }));
-
-                // If depotCoords is present, the first leg is Depot -> Stop 1, which might be useful,
-                // but Mapbox returns N-1 legs for N coordinates.
-                dispatch({ type: 'SET_ROUTE_STATS', payload: { routeId, distanceMiles, durationMinutes, legStats } });
+    // ── Bulk: calculate directions for all routes ─────────────────────────────
+    const handleCalcAll = async () => {
+        setBulkOptimizing('calc');
+        for (const route of allRoutes) {
+            if (route.stopIds.length >= 1) {
+                await fetchRouteStats(route.id, route.stopIds);
+                // Small delay to avoid rate limiting
+                await new Promise(r => setTimeout(r, 300));
             }
-        } catch { }
+        }
+        setBulkOptimizing(null);
     };
 
-
+    // ── Bulk: optimize all routes by distance or duration ────────────────────
+    const handleOptimizeAll = async (mode: 'distance' | 'duration') => {
+        setBulkOptimizing(mode);
+        for (const route of allRoutes) {
+            if (route.stopIds.length >= 2) {
+                const stops = route.stopIds.map(id => state.stops[id]).filter(s => s?.coordinates);
+                const result = await optimizeRoute(stops, mode);
+                dispatch({ type: 'REORDER_ROUTE_STOPS', payload: { routeId: route.id, stopIds: result.orderedIds } });
+                if (result.geometry) {
+                    dispatch({ type: 'SET_ROUTE_GEOMETRY', payload: { routeId: route.id, geometry: result.geometry } });
+                } else {
+                    // Fallback: fetch geometry via Directions API (same as single-route optimize)
+                    const orderedStops = result.orderedIds.map(id => state.stops[id]).filter(Boolean);
+                    const geometry = await getRouteDirections(orderedStops, state.settings.depotCoords);
+                    if (geometry) dispatch({ type: 'SET_ROUTE_GEOMETRY', payload: { routeId: route.id, geometry } });
+                }
+                await fetchRouteStats(route.id, result.orderedIds);
+                await new Promise(r => setTimeout(r, 400));
+            }
+        }
+        setBulkOptimizing(null);
+    };
 
     const handleSmartGenerate = () => {
         if (vehicleAssignments.length === 0) return;
@@ -278,7 +370,7 @@ export function RouteEditor() {
         exportRoutesToPDF(state, routeIds);
     };
 
-    const renderRouteCard = (route: typeof allRoutes[0]) => {
+    const renderRouteCard = (route: Route) => {
         const vehicle = state.vehicles[route.vehicleId];
         const totalBags = route.stopIds.reduce((sum, id) => {
             const stop = state.stops[id];
@@ -286,6 +378,8 @@ export function RouteEditor() {
             return sum + (state.activeServiceMode === 'spreading' ? (stop.spreadingOrder?.quantity || 0) : stop.totalBags);
         }, 0);
         const isSelected = state.selectedRouteId === route.id;
+        // Use pre-computed ETA map from component level
+        const etaMap = routeETAMaps[route.id] ?? new Map<string, ReturnType<typeof computeRouteETAs>[0]>();
 
         return (
             <div
@@ -336,7 +430,7 @@ export function RouteEditor() {
                     {vehicle && vehicle.maxBagCapacity !== 9999 && <span className={`route-stat ${totalBags > vehicle.maxBagCapacity ? 'route-over-capacity' : ''}`}>{Math.round((totalBags / vehicle.maxBagCapacity) * 100)}%</span>}
                     {route.mulchType && <span className="route-stat">{route.mulchType}</span>}
                     {route.distanceMiles != null && <span className="route-stat">{route.distanceMiles.toFixed(1)} mi</span>}
-                    {route.durationMinutes != null && <span className="route-stat">{Math.round(route.durationMinutes)} min</span>}
+                    {route.durationMinutes != null && <span className="route-stat">{Math.round(route.durationMinutes)} min drive</span>}
                 </div>
 
                 <div className="route-controls">
@@ -346,6 +440,9 @@ export function RouteEditor() {
                         </button>
                         <button onClick={() => handleOptimize(route.id, 'duration')} disabled={optimizing === route.id || route.stopIds.length < 2} className="btn btn-xs btn-outline" title="Optimize time">
                             {optimizing === route.id ? '...' : <><Clock size={12} /> Time</>}
+                        </button>
+                        <button onClick={() => fetchRouteStats(route.id, route.stopIds)} disabled={optimizing === route.id || route.stopIds.length < 1} className="btn btn-xs btn-outline" title="Fetch directions/ETA">
+                            <RefreshCw size={12} /> Calc
                         </button>
                         <button onClick={() => handleSelectRoute(route.id)} className={`btn btn-xs ${isSelected ? 'btn-primary' : 'btn-outline'}`} title={isSelected ? 'Stop editing' : 'Click markers on map'}>
                             <MapPin size={12} /> {isSelected ? 'Editing' : 'Edit'}
@@ -361,6 +458,7 @@ export function RouteEditor() {
                                     const stop = state.stops[stopId];
                                     if (!stop) return null;
                                     const streetAddr = stop.fullAddress.split(',')[0]?.trim() || '';
+                                    const etaInfo = etaMap.get(stopId);
                                     return (
                                         <Draggable key={stopId} draggableId={stopId} index={index}>
                                             {(p2, s2) => (
@@ -377,12 +475,32 @@ export function RouteEditor() {
                                                         </span>
                                                         <span className="route-stop-address">{streetAddr} • {stop.postalCode}</span>
                                                         <span className="route-stop-detail">{getStopMetricValue(stop, stopMetric, state.activeServiceMode)}</span>
+                                                        {/* ETA display */}
+                                                        {etaInfo && (
+                                                            <span style={{
+                                                                fontSize: 11,
+                                                                color: 'var(--color-primary, #3b82f6)',
+                                                                fontWeight: 600,
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: 4,
+                                                                marginTop: 2,
+                                                            }}>
+                                                                <Timer size={10} />
+                                                                ETA {etaInfo.etaStr}
+                                                                {etaInfo.timeAtStop > 0 && (
+                                                                    <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>
+                                                                        · ~{Math.round(etaInfo.timeAtStop)} min at stop
+                                                                    </span>
+                                                                )}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <button onClick={() => dispatch({ type: 'TOGGLE_STOP_DISABLED', payload: stop.id })} className={`btn btn-xs btn-ghost ${stop.isDisabled ? 'btn-primary' : ''}`} title={stop.isDisabled ? "Enable stop" : "Disable stop"}>
                                                         {stop.isDisabled ? <Eye size={12} /> : <EyeOff size={12} />}
                                                     </button>
                                                     <button onClick={() => dispatch({ type: 'REMOVE_STOP_FROM_ROUTE', payload: { stopId, routeId: route.id } })} className="btn btn-xs btn-ghost" title="Remove from route"><X size={12} /></button>
-                                                    {/* Leg Stat Rendering */}
+                                                    {/* Leg stat connector */}
                                                     {route.legStats && (route.legStats.length > index + (state.settings.depotCoords ? 1 : 0)) && (
                                                         <div style={{ position: 'absolute', bottom: '-26px', left: '44px', display: 'flex', alignItems: 'center', color: 'var(--text-tertiary)', fontSize: 11, zIndex: 0 }}>
                                                             <div style={{ borderLeft: '2px dashed var(--border)', height: 20, marginRight: 8 }}></div>
@@ -420,7 +538,7 @@ export function RouteEditor() {
                 </div>
             </div>
 
-            {/* Controls bar: sort, metric, export all */}
+            {/* Controls bar: sort, metric, bulk actions, export all */}
             {allRoutes.length > 0 && (
                 <div className="route-controls-bar">
                     <div className="route-controls-left">
@@ -432,7 +550,32 @@ export function RouteEditor() {
                             {Object.entries(METRIC_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                         </select>
                     </div>
-                    <div className="route-controls-right">
+                    <div className="route-controls-right" style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
+                        {/* Bulk action buttons */}
+                        <button
+                            onClick={handleCalcAll}
+                            disabled={bulkOptimizing !== null}
+                            className="btn btn-xs btn-outline"
+                            title="Calculate directions & ETA for all routes"
+                        >
+                            <RefreshCw size={12} /> {bulkOptimizing === 'calc' ? 'Calc…' : 'Calc All'}
+                        </button>
+                        <button
+                            onClick={() => handleOptimizeAll('distance')}
+                            disabled={bulkOptimizing !== null}
+                            className="btn btn-xs btn-outline"
+                            title="Optimize all routes by distance"
+                        >
+                            <Zap size={12} /> {bulkOptimizing === 'distance' ? 'Optimizing…' : 'Dist All'}
+                        </button>
+                        <button
+                            onClick={() => handleOptimizeAll('duration')}
+                            disabled={bulkOptimizing !== null}
+                            className="btn btn-xs btn-outline"
+                            title="Optimize all routes by time"
+                        >
+                            <Clock size={12} /> {bulkOptimizing === 'duration' ? 'Optimizing…' : 'Time All'}
+                        </button>
                         <button onClick={() => handleExportCSV()} className="btn btn-xs btn-outline" title="Export all CSV"><Download size={12} /> CSV</button>
                         <button onClick={() => handleExportPDF()} className="btn btn-xs btn-outline" title="Print all PDF"><FileText size={12} /> PDF</button>
                     </div>
@@ -446,6 +589,19 @@ export function RouteEditor() {
                     <span>Editing: <strong>{state.routes[state.selectedRouteId].name}</strong></span>
                     <span className="edit-mode-hint">Click markers on map to add stops</span>
                     <button onClick={() => dispatch({ type: 'SELECT_ROUTE', payload: null })} className="btn btn-xs btn-ghost">Done</button>
+                </div>
+            )}
+
+            {/* Delivery-first dependency warnings */}
+            {dependencyWarnings.length > 0 && (
+                <div className="auto-gen-errors" style={{ borderColor: 'var(--color-warning, #f59e0b)', background: 'rgba(245,158,11,0.07)' }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>
+                        <AlertCircle size={14} style={{ display: 'inline', marginRight: 4 }} />
+                        Delivery-First Dependency Issues
+                    </div>
+                    {dependencyWarnings.map((w, i) => (
+                        <div key={i} style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '2px 0' }}>{w}</div>
+                    ))}
                 </div>
             )}
 

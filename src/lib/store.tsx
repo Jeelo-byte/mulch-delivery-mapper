@@ -5,6 +5,8 @@ import type { AppState, AppAction } from './types';
 
 const STORAGE_KEY = 'mulch-route-optimizer-state';
 
+const todayISO = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
 const defaultSettings = {
     fuelCostPerMile: 0.655,
     depotAddress: '',
@@ -13,8 +15,12 @@ const defaultSettings = {
     mapboxToken: '',
     enforceWeightLimits: false,
     laborTimePerSpreadBag: 3,
+    timeSpentPerDeliveryBag: 2,
     routeGenerationMode: 'Geographic' as const,
-    startTime: '08:00',
+    deliveryStartTime: '08:00',
+    spreadingStartTime: '09:00',
+    deliveryDate: todayISO,
+    spreadingDate: todayISO,
     lunchBreakStartTime: '12:00',
     lunchBreakDuration: 30,
 };
@@ -271,17 +277,29 @@ function appReducer(state: AppState, action: AppAction): AppState {
                 updatedRoutes[currentRouteId] = {
                     ...updatedRoutes[currentRouteId],
                     stopIds: updatedRoutes[currentRouteId].stopIds.filter((id) => id !== stopId),
+                    // Clear stale calculation for the route we just modified
+                    routeGeometry: null,
+                    distanceMiles: null,
+                    durationMinutes: null,
+                    legStats: undefined,
                 };
             }
 
-            // Add to new route (prevent duplicates)
+            // Add to new route (prevent duplicates), and clear its stale calc too
             const newStopIds = [...route.stopIds.filter(id => id !== stopId)];
             if (index !== undefined) {
                 newStopIds.splice(index, 0, stopId);
             } else {
                 newStopIds.push(stopId);
             }
-            updatedRoutes[routeId] = { ...updatedRoutes[routeId], stopIds: newStopIds };
+            updatedRoutes[routeId] = {
+                ...updatedRoutes[routeId],
+                stopIds: newStopIds,
+                routeGeometry: null,
+                distanceMiles: null,
+                durationMinutes: null,
+                legStats: undefined,
+            };
 
             return {
                 ...state,
@@ -305,6 +323,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
                     [routeId]: {
                         ...route,
                         stopIds: route.stopIds.filter((id) => id !== stopId),
+                        // Invalidate calculated path – user must recalculate
+                        routeGeometry: null,
+                        distanceMiles: null,
+                        durationMinutes: null,
+                        legStats: undefined,
                     },
                 },
                 stops: {
@@ -316,11 +339,27 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
         case 'REORDER_ROUTE_STOPS': {
             const { routeId, stopIds } = action.payload;
+            const existingRoute = state.routes[routeId];
+            if (!existingRoute) return state;
+
+            // Only clear if order actually changed
+            const orderChanged = stopIds.some((id, i) => id !== existingRoute.stopIds[i]);
+
             return {
                 ...state,
                 routes: {
                     ...state.routes,
-                    [routeId]: { ...state.routes[routeId], stopIds },
+                    [routeId]: {
+                        ...existingRoute,
+                        stopIds,
+                        // Wipe stale path data whenever stop order changes
+                        ...(orderChanged ? {
+                            routeGeometry: null,
+                            distanceMiles: null,
+                            durationMinutes: null,
+                            legStats: undefined,
+                        } : {}),
+                    },
                 },
             };
         }
@@ -341,8 +380,23 @@ function appReducer(state: AppState, action: AppAction): AppState {
                 ...state,
                 routes: {
                     ...state.routes,
-                    [sourceRouteId]: { ...sourceRoute, stopIds: newSourceStops },
-                    [destRouteId]: { ...destRoute, stopIds: newDestStops },
+                    // Clear stale calc for both affected routes
+                    [sourceRouteId]: {
+                        ...sourceRoute,
+                        stopIds: newSourceStops,
+                        routeGeometry: null,
+                        distanceMiles: null,
+                        durationMinutes: null,
+                        legStats: undefined,
+                    },
+                    [destRouteId]: {
+                        ...destRoute,
+                        stopIds: newDestStops,
+                        routeGeometry: null,
+                        distanceMiles: null,
+                        durationMinutes: null,
+                        legStats: undefined,
+                    },
                 },
                 stops: {
                     ...state.stops,
@@ -497,12 +551,20 @@ function appReducer(state: AppState, action: AppAction): AppState {
             };
         }
 
-        case 'RESTORE_STATE':
+        case 'RESTORE_STATE': {
+            const restoredSettings = action.payload.settings || {};
+            // Migrate old startTime → deliveryStartTime / spreadingStartTime
+            const migratedSettings: Partial<typeof defaultSettings> = { ...restoredSettings };
+            if ('startTime' in restoredSettings && !('deliveryStartTime' in restoredSettings)) {
+                migratedSettings.deliveryStartTime = (restoredSettings as Record<string, unknown>)['startTime'] as string;
+                migratedSettings.spreadingStartTime = (restoredSettings as Record<string, unknown>)['startTime'] as string;
+            }
             return {
                 ...state,
                 ...action.payload,
-                settings: { ...defaultSettings, ...(action.payload.settings || {}) }
+                settings: { ...defaultSettings, ...migratedSettings }
             };
+        }
 
         default:
             return state;

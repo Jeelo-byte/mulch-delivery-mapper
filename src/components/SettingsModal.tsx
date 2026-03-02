@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { X, Settings as SettingsIcon, Save } from 'lucide-react';
+import { X, Settings as SettingsIcon, Save, MapPin } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppState, useAppDispatch } from '@/src/lib/store';
+import { geocodeAddress } from '@/src/lib/geocoder';
 
 interface SettingsModalProps {
     onClose: () => void;
@@ -13,30 +14,61 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     const state = useAppState();
     const dispatch = useAppDispatch();
 
-    const [fuelCost, setFuelCost] = useState(state.settings.fuelCostPerMile.toString());
-    const [defaultCap, setDefaultCap] = useState(state.settings.defaultCapacity.toString());
     const [depot, setDepot] = useState(state.settings.depotAddress);
+    const [geocodingDepot, setGeocodingDepot] = useState(false);
+    const [geocodeError, setGeocodeError] = useState('');
 
     const [enforceWeightLimits, setEnforceWeightLimits] = useState(state.settings.enforceWeightLimits);
     const [laborTime, setLaborTime] = useState(state.settings.laborTimePerSpreadBag.toString());
+    const [deliveryBagTime, setDeliveryBagTime] = useState(state.settings.timeSpentPerDeliveryBag.toString());
     const [generationMode, setGenerationMode] = useState(state.settings.routeGenerationMode);
 
-    // new time schedule bits
-    const [startTime, setStartTime] = useState(state.settings.startTime || '08:00');
+    // Two distinct start times + dates
+    const todayISO = new Date().toISOString().split('T')[0];
+    const [deliveryStart, setDeliveryStart] = useState(state.settings.deliveryStartTime || '08:00');
+    const [spreadingStart, setSpreadingStart] = useState(state.settings.spreadingStartTime || '09:00');
+    const [deliveryDate, setDeliveryDate] = useState(state.settings.deliveryDate || todayISO);
+    const [spreadingDate, setSpreadingDate] = useState(state.settings.spreadingDate || todayISO);
     const [lunchStart, setLunchStart] = useState(state.settings.lunchBreakStartTime || '12:00');
     const [lunchDuration, setLunchDuration] = useState((state.settings.lunchBreakDuration || 30).toString());
 
-    const handleSave = () => {
+    const syncDates = () => setSpreadingDate(deliveryDate);
+
+    const handleSave = async () => {
+        setGeocodeError('');
+        let depotCoords = state.settings.depotCoords;
+
+        // Re-geocode if the depot address changed
+        if (depot.trim() && depot.trim() !== state.settings.depotAddress.trim()) {
+            setGeocodingDepot(true);
+            try {
+                const coords = await geocodeAddress(depot.trim());
+                depotCoords = coords;
+                if (!coords) {
+                    setGeocodeError('Could not geocode depot address. Check the address and try again.');
+                }
+            } catch {
+                setGeocodeError('Geocoding failed. Please verify the address.');
+            } finally {
+                setGeocodingDepot(false);
+            }
+        } else if (!depot.trim()) {
+            depotCoords = null;
+        }
+
         dispatch({
             type: 'SET_SETTINGS',
             payload: {
-                fuelCostPerMile: parseFloat(fuelCost) || 0.655,
-                defaultCapacity: parseInt(defaultCap) || 50,
                 depotAddress: depot,
+                depotCoords,
                 enforceWeightLimits,
                 laborTimePerSpreadBag: parseInt(laborTime) || 3,
+                timeSpentPerDeliveryBag: parseInt(deliveryBagTime) || 2,
                 routeGenerationMode: generationMode,
-                startTime: startTime,
+                deliveryStartTime: deliveryStart,
+                spreadingStartTime: spreadingStart,
+                deliveryDate,
+                spreadingDate,
                 lunchBreakStartTime: lunchStart,
                 lunchBreakDuration: parseInt(lunchDuration) || 30,
             },
@@ -51,22 +83,23 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         }
     };
 
-    // Compute stats
+    // Compute stats — use per-vehicle fuel cost
     const routeStats = Object.values(state.routes).map(route => {
         const vehicle = state.vehicles[route.vehicleId];
         const totalBags = route.stopIds.reduce(
             (sum, id) => sum + (state.stops[id]?.totalBags || 0), 0
         );
-        const fuelCostVal = route.distanceMiles
-            ? route.distanceMiles * (parseFloat(fuelCost) || 0.655)
+        const vehicleFuelRate = vehicle?.fuelCostPerMile ?? 0;
+        const fuelCostVal = route.distanceMiles && vehicleFuelRate > 0
+            ? route.distanceMiles * vehicleFuelRate
             : null;
-        return { route, vehicle, totalBags, fuelCostVal };
+        return { route, vehicle, totalBags, fuelCostVal, vehicleFuelRate };
     });
 
     const totalMiles = Object.values(state.routes).reduce(
         (sum, r) => sum + (r.distanceMiles || 0), 0
     );
-    const totalFuel = totalMiles * (parseFloat(fuelCost) || 0.655);
+    const totalFuel = routeStats.reduce((sum, s) => sum + (s.fuelCostVal || 0), 0);
 
     return (
         <AnimatePresence>
@@ -88,7 +121,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <div>
                             <h2 className="modal-title">
                                 <SettingsIcon size={20} style={{ display: 'inline', marginRight: 8 }} />
-                                Settings & Statistics
+                                Settings &amp; Statistics
                             </h2>
                             <p className="modal-subtitle">Configure costs and view route statistics</p>
                         </div>
@@ -103,50 +136,23 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                             <h3 className="modal-section-title">Configuration</h3>
                             <div className="form-grid">
                                 <div className="form-field">
-                                    <label className="form-label">Fuel Cost ($/mile)</label>
-                                    <input
-                                        type="number" step="0.01" min="0"
-                                        value={fuelCost}
-                                        onChange={(e) => setFuelCost(e.target.value)}
-                                        className="input"
-                                        placeholder="0.655"
-                                    />
-                                </div>
-                                <div className="form-field">
-                                    <label className="form-label">Default Vehicle Capacity</label>
-                                    <input
-                                        type="number" min="1"
-                                        value={defaultCap}
-                                        onChange={(e) => setDefaultCap(e.target.value)}
-                                        className="input"
-                                        placeholder="50"
-                                    />
-                                </div>
-                                <div className="form-field form-field-full">
-                                    <label className="form-label">Depot Address (start point)</label>
-                                    <input
-                                        value={depot}
-                                        onChange={(e) => setDepot(e.target.value)}
-                                        className="input"
-                                        placeholder="e.g. 123 Main St, Plano, TX 75023"
-                                    />
-                                </div>
-                                <div className="form-field form-field-full" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: 8 }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={enforceWeightLimits}
-                                        onChange={(e) => setEnforceWeightLimits(e.target.checked)}
-                                        id="enforceWeight"
-                                    />
-                                    <label htmlFor="enforceWeight" className="form-label" style={{ marginBottom: 0 }}>Enforce Vehicle Weight Limits</label>
-                                </div>
-                                <div className="form-field">
                                     <label className="form-label">Labor Time per Spread Bag (mins)</label>
                                     <input
                                         type="number" min="1"
                                         value={laborTime}
                                         onChange={(e) => setLaborTime(e.target.value)}
                                         className="input"
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Time Spent per Delivery Bag (mins)</label>
+                                    <input
+                                        type="number" min="0" step="0.5"
+                                        value={deliveryBagTime}
+                                        onChange={(e) => setDeliveryBagTime(e.target.value)}
+                                        className="input"
+                                        placeholder="2"
+                                        title="Minutes per bag to unload at each delivery stop"
                                     />
                                 </div>
                                 <div className="form-field">
@@ -161,17 +167,97 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                         <option value="Spreading Only">Spreading Only</option>
                                     </select>
                                 </div>
-                                <div className="form-field">
-                                    <label className="form-label">Route Start Time</label>
+
+                                {/* Depot address — full width */}
+                                <div className="form-field form-field-full">
+                                    <label className="form-label">
+                                        <MapPin size={12} style={{ display: 'inline', marginRight: 4 }} />
+                                        Depot Address (Start &amp; End Point for all routes)
+                                    </label>
                                     <input
-                                        type="time"
-                                        value={startTime}
-                                        onChange={(e) => setStartTime(e.target.value)}
+                                        value={depot}
+                                        onChange={(e) => { setDepot(e.target.value); setGeocodeError(''); }}
+                                        className="input"
+                                        placeholder="e.g. 123 Main St, Plano, TX 75023"
+                                    />
+                                    {geocodeError && (
+                                        <p style={{ color: 'var(--color-danger)', fontSize: 12, marginTop: 4 }}>{geocodeError}</p>
+                                    )}
+                                    {state.settings.depotCoords && depot === state.settings.depotAddress && (
+                                        <p style={{ color: 'var(--color-success, #22c55e)', fontSize: 11, marginTop: 4 }}>
+                                            ✓ Geocoded: [{state.settings.depotCoords[1].toFixed(4)}, {state.settings.depotCoords[0].toFixed(4)}]
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div className="form-field form-field-full" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: 8 }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={enforceWeightLimits}
+                                        onChange={(e) => setEnforceWeightLimits(e.target.checked)}
+                                        id="enforceWeight"
+                                    />
+                                    <label htmlFor="enforceWeight" className="form-label" style={{ marginBottom: 0 }}>Enforce Vehicle Weight Limits</label>
+                                </div>
+                            </div>
+
+                            {/* Timing section */}
+                            <h4 className="modal-section-title" style={{ marginTop: 20, fontSize: 13 }}>⏱ Schedule Timing</h4>
+                            <div className="form-grid">
+                                {/* Delivery date + time */}
+                                <div className="form-field">
+                                    <label className="form-label">🚛 Delivery Date</label>
+                                    <input
+                                        type="date"
+                                        value={deliveryDate}
+                                        onChange={(e) => setDeliveryDate(e.target.value)}
                                         className="input"
                                     />
                                 </div>
                                 <div className="form-field">
-                                    <label className="form-label">Lunch Break Start Time</label>
+                                    <label className="form-label">🚛 Delivery Start Time</label>
+                                    <input
+                                        type="time"
+                                        value={deliveryStart}
+                                        onChange={(e) => setDeliveryStart(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+
+                                {/* Spreading date + time */}
+                                <div className="form-field">
+                                    <label className="form-label">
+                                        🌱 Spreading Date
+                                        <button
+                                            type="button"
+                                            onClick={syncDates}
+                                            className="btn btn-xs btn-ghost"
+                                            style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px' }}
+                                            title="Set same day as delivery"
+                                        >
+                                            Same Day
+                                        </button>
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={spreadingDate}
+                                        onChange={(e) => setSpreadingDate(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">🌱 Spreading Start Time</label>
+                                    <input
+                                        type="time"
+                                        value={spreadingStart}
+                                        onChange={(e) => setSpreadingStart(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+
+                                {/* Lunch break */}
+                                <div className="form-field">
+                                    <label className="form-label">🍽️ Lunch Break Start</label>
                                     <input
                                         type="time"
                                         value={lunchStart}
@@ -180,7 +266,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                     />
                                 </div>
                                 <div className="form-field">
-                                    <label className="form-label">Lunch Break Duration (mins)</label>
+                                    <label className="form-label">Lunch Duration (mins)</label>
                                     <input
                                         type="number" min="0"
                                         value={lunchDuration}
@@ -204,7 +290,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                                 <th>Stops</th>
                                                 <th>Bags</th>
                                                 <th>Miles</th>
-                                                <th>Time</th>
+                                                <th>Drive Time</th>
                                                 <th>Fuel Cost</th>
                                             </tr>
                                         </thead>
@@ -268,8 +354,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                         <div className="form-actions">
                             <div />
-                            <button onClick={handleSave} className="btn btn-primary">
-                                <Save size={14} /> Save Settings
+                            <button onClick={handleSave} className="btn btn-primary" disabled={geocodingDepot}>
+                                {geocodingDepot ? (
+                                    <><MapPin size={14} /> Geocoding…</>
+                                ) : (
+                                    <><Save size={14} /> Save Settings</>
+                                )}
                             </button>
                         </div>
                     </div>

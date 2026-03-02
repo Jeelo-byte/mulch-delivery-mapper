@@ -95,6 +95,7 @@ export function AddStopForm({ onClose }: AddStopFormProps) {
             isDisabled: false,
             allLineItems: [],
             routeId: null,
+            spreadingRouteId: null,
         };
 
         dispatch({ type: 'ADD_STOP', payload: stop });

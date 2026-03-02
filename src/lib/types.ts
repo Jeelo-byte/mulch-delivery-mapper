@@ -158,18 +158,32 @@ export interface AppSettings {
   fuelCostPerMile: number;     // global fallback $ per mile
   depotAddress: string;        // starting location for routes
   depotCoords: [number, number] | null; // geocoded depot coordinates
-  defaultCapacity: number;     // default bags for new vehicles
+  defaultCapacity?: number;    // kept for backward compat (not shown in UI)
   mapboxToken: string;         // editable Mapbox token
   enforceWeightLimits: boolean;
-  laborTimePerSpreadBag: number;
+  laborTimePerSpreadBag: number;     // mins per bag for spreading crew
+  timeSpentPerDeliveryBag: number;   // mins per bag for delivery crew (unload)
   routeGenerationMode: 'Geographic' | 'By Scout' | 'Spreading Only';
-  startTime?: string;
+  deliveryStartTime: string;   // start time for mulch delivery crew
+  spreadingStartTime: string;  // start time for spreading crew
+  deliveryDate: string;        // YYYY-MM-DD date for delivery crew
+  spreadingDate: string;       // YYYY-MM-DD date for spreading crew (defaults same day)
   lunchBreakStartTime?: string;
   lunchBreakDuration?: number;
 }
 
 // ── Optimization mode ──
 export type OptimizationMode = 'distance' | 'duration';
+
+// ── Per-stop time spent computation helper (used in export & UI) ──
+export interface StopTimeInfo {
+  /** ETA string like "9:15 AM" */
+  etaStr: string;
+  /** Minutes spent at this stop (labor) */
+  timeAtStop: number;
+  /** Cumulative minutes elapsed from route start */
+  cumulativeMins: number;
+}
 
 // ── App state ──
 export interface AppState {

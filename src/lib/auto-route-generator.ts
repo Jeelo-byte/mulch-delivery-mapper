@@ -52,14 +52,18 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
 
     const isSpreadingMode = state.activeServiceMode === 'spreading';
 
-    // 1. Collect unassigned, non-disabled stops
+    // 1. Collect unassigned, non-disabled stops.
+    // In spreading mode, check spreadingRouteId — stops may already be on a
+    // mulch delivery route (routeId) but still be unassigned for spreading.
     let allStops = state.stopOrder
         .map(id => state.stops[id])
-        .filter(s => s && !s.routeId && !s.isDisabled);
-
-    if (isSpreadingMode) {
-        allStops = allStops.filter(s => s.spreadingOrder && s.spreadingOrder.quantity > 0);
-    }
+        .filter(s => {
+            if (!s || s.isDisabled) return false;
+            if (isSpreadingMode) {
+                return !s.spreadingRouteId && s.spreadingOrder && s.spreadingOrder.quantity > 0;
+            }
+            return !s.routeId;
+        });
 
     if (allStops.length === 0) {
         errors.push(isSpreadingMode ? 'No unassigned spreading stops available.' : 'No unassigned stops available.');
