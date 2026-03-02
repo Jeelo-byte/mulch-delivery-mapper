@@ -18,6 +18,7 @@ export function exportRoutesToCSV(
         'Vehicle',
         'Trip #',
         'Stop #',
+        'ETA',
         'Recipient Name',
         'Street Address',
         'City',
@@ -41,13 +42,48 @@ export function exportRoutesToCSV(
     const rows: string[][] = [headers];
     const fuelRate = state.settings.fuelCostPerMile;
 
+    const startTimeMins = (state.settings.startTime || '08:00').split(':').reduce((h, m) => h * 60 + Number(m), 0);
+    const lunchStartMins = (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0);
+    const lunchDuration = state.settings.lunchBreakDuration || 30;
+    const laborTime = state.settings.laborTimePerSpreadBag || 3;
+
+    function formatTime(mins: number) {
+        const m = Math.round(mins);
+        const pm = (Math.floor(m / 60) % 24) >= 12;
+        const hStr = (Math.floor(m / 60) % 12) || 12;
+        const mStr = (m % 60).toString().padStart(2, '0');
+        return `${hStr}:${mStr} ${pm ? 'PM' : 'AM'}`;
+    }
+
     for (const route of routes) {
         const vehicle = state.vehicles[route.vehicleId];
         const fuelCost = route.distanceMiles ? (route.distanceMiles * fuelRate).toFixed(2) : '';
 
+        let currentMins = startTimeMins;
+        let hasTakenLunch = false;
+        const legOffset = state.settings.depotCoords ? 1 : 0;
+
+        // Add initial depot drive leg
+        if (route.legStats && route.legStats[0] && state.settings.depotCoords) {
+            currentMins += route.legStats[0].durationMinutes;
+        }
+
         route.stopIds.forEach((stopId, idx) => {
             const stop = state.stops[stopId];
             if (!stop) return;
+
+            if (idx > 0 && route.legStats) {
+                const leg = route.legStats[idx - 1 + legOffset];
+                if (leg) currentMins += leg.durationMinutes;
+            }
+
+            let etaStr = formatTime(currentMins);
+            if (!hasTakenLunch && currentMins >= lunchStartMins) {
+                currentMins += lunchDuration;
+                hasTakenLunch = true;
+                etaStr = formatTime(currentMins) + ' (aft lunch)';
+            }
+            if (stop.spreadingOrder) currentMins += stop.spreadingOrder.quantity * laborTime;
 
             // One row per mulch order at this stop
             if (stop.mulchOrders.length > 0) {
@@ -57,6 +93,7 @@ export function exportRoutesToCSV(
                         vehicle?.name || '',
                         '', // trip # (part of route name)
                         String(idx + 1),
+                        etaStr,
                         stop.recipientName,
                         stop.fullAddress.split(',')[0]?.trim() || stop.fullAddress,
                         stop.city,
@@ -83,6 +120,7 @@ export function exportRoutesToCSV(
                     vehicle?.name || '',
                     '',
                     String(idx + 1),
+                    etaStr,
                     stop.recipientName,
                     stop.fullAddress.split(',')[0]?.trim() || stop.fullAddress,
                     stop.city,
@@ -137,6 +175,19 @@ export function exportRoutesToPDF(
 
     const fuelRate = state.settings.fuelCostPerMile;
     const depotAddr = state.settings.depotAddress || 'Not set';
+
+    const startTimeMins = (state.settings.startTime || '08:00').split(':').reduce((h, m) => h * 60 + Number(m), 0);
+    const lunchStartMins = (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0);
+    const lunchDuration = state.settings.lunchBreakDuration || 30;
+    const laborTime = state.settings.laborTimePerSpreadBag || 3;
+
+    function formatTime(mins: number) {
+        const m = Math.round(mins);
+        const pm = (Math.floor(m / 60) % 24) >= 12;
+        const hStr = (Math.floor(m / 60) % 12) || 12;
+        const mStr = (m % 60).toString().padStart(2, '0');
+        return `${hStr}:${mStr} ${pm ? 'PM' : 'AM'}`;
+    }
 
     let html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Route Delivery Sheet</title>
@@ -197,6 +248,7 @@ export function exportRoutesToPDF(
     <table>
         <thead><tr>
             <th>#</th>
+            <th>ETA</th>
             <th>Recipient</th>
             <th>Address</th>
             <th>Zip</th>
@@ -209,12 +261,33 @@ export function exportRoutesToPDF(
 
         // Depot start row
         if (depotAddr !== 'Not set') {
-            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td colspan="7"><strong>START:</strong> ${depotAddr}</td></tr>`;
+            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td colspan="8"><strong>START:</strong> ${depotAddr} @ ${formatTime(startTimeMins)}</td></tr>`;
+        }
+
+        let currentMins = startTimeMins;
+        let hasTakenLunch = false;
+        const legOffset = state.settings.depotCoords ? 1 : 0;
+
+        if (route.legStats && route.legStats[0] && state.settings.depotCoords) {
+            currentMins += route.legStats[0].durationMinutes;
         }
 
         route.stopIds.forEach((stopId, idx) => {
             const stop = state.stops[stopId];
             if (!stop) return;
+
+            if (idx > 0 && route.legStats) {
+                const leg = route.legStats[idx - 1 + legOffset];
+                if (leg) currentMins += leg.durationMinutes;
+            }
+
+            let etaStr = formatTime(currentMins);
+            if (!hasTakenLunch && currentMins >= lunchStartMins) {
+                currentMins += lunchDuration;
+                hasTakenLunch = true;
+                etaStr = formatTime(currentMins) + '<br><small style="color:red">(aft lunch)</small>';
+            }
+            if (stop.spreadingOrder) currentMins += stop.spreadingOrder.quantity * laborTime;
 
             const streetAddr = stop.fullAddress.split(',')[0]?.trim() || stop.fullAddress;
             const mulchInfo = stop.mulchOrders.map(o =>
@@ -229,6 +302,7 @@ export function exportRoutesToPDF(
 
             html += `<tr>
                 <td class="stop-num">${idx + 1}</td>
+                <td><strong>${etaStr}</strong></td>
                 <td>${stop.recipientName}</td>
                 <td>${streetAddr}</td>
                 <td>${stop.postalCode}</td>
@@ -241,10 +315,10 @@ export function exportRoutesToPDF(
 
         // Depot end row
         if (depotAddr !== 'Not set') {
-            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td colspan="7"><strong>RETURN:</strong> ${depotAddr}</td></tr>`;
+            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td colspan="8"><strong>RETURN:</strong> ${depotAddr}</td></tr>`;
         }
 
-        html += `<tr class="totals"><td></td><td colspan="4">Total</td><td>${totalBags}</td><td colspan="2"></td></tr>`;
+        html += `<tr class="totals"><td></td><td></td><td colspan="4">Total</td><td>${totalBags}</td><td colspan="2"></td></tr>`;
         html += `</tbody></table></div>`;
     }
 

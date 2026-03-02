@@ -35,6 +35,7 @@ export function OrderDetailModal({ stop, onClose }: OrderDetailModalProps) {
     // Sync form from stop
     useEffect(() => {
         if (stop) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
             setRecipientName(stop.recipientName);
             setRecipientEmail(stop.recipientEmail);
             setRecipientPhone(stop.recipientPhone);

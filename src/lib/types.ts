@@ -97,18 +97,25 @@ export interface DeliveryStop {
   fulfillmentNotes: string;
   isHotshot: boolean;
   isDisabled: boolean; // excluded from routing but still displayed
+  hasFrontWalk?: boolean;
+  hasSideHouse?: boolean;
+  hasCriticalNote?: boolean;
   allLineItems: ParsedLineItem[];
   routeId: string | null;
+  spreadingRouteId: string | null;
 }
 
 // ── Vehicle types ──
-export type VehicleType = 'Truck' | 'Trailer';
+export type VehicleType = 'Truck' | 'Trailer' | 'Car';
 
 export interface Vehicle {
   id: string;
   name: string;
   type: VehicleType;
-  capacity: number; // max bags
+  maxBagCapacity: number; // replacing capacity
+  maxWeightLimit: number;
+  fuelCostPerMile?: number; // per-vehicle override
+  serviceMode: 'mulch' | 'spreading';
 }
 
 // ── Route ──
@@ -116,6 +123,7 @@ export interface Route {
   id: string;
   name: string;
   vehicleId: string;
+  serviceMode: 'mulch' | 'spreading';
   mulchType: MulchType | null;   // enforced single-type constraint
   stopIds: string[];
   color: string;
@@ -124,6 +132,8 @@ export interface Route {
   routeGeometry: GeoJSON.LineString | null;
   distanceMiles: number | null;     // total route distance
   durationMinutes: number | null;   // total drive time
+  legStats?: { distanceMiles: number; durationMinutes: number }[];
+  lifoLoadingManifest?: string[];   // For driver LIFO loading
 }
 
 // ── Filters ──
@@ -145,11 +155,17 @@ export interface OverlayConfig {
 
 // ── App settings ──
 export interface AppSettings {
-  fuelCostPerMile: number;     // $ per mile
+  fuelCostPerMile: number;     // global fallback $ per mile
   depotAddress: string;        // starting location for routes
   depotCoords: [number, number] | null; // geocoded depot coordinates
   defaultCapacity: number;     // default bags for new vehicles
   mapboxToken: string;         // editable Mapbox token
+  enforceWeightLimits: boolean;
+  laborTimePerSpreadBag: number;
+  routeGenerationMode: 'Geographic' | 'By Scout' | 'Spreading Only';
+  startTime?: string;
+  lunchBreakStartTime?: string;
+  lunchBreakDuration?: number;
 }
 
 // ── Optimization mode ──
@@ -171,6 +187,7 @@ export interface AppState {
   settings: AppSettings;
 
   // UI state
+  activeServiceMode: 'mulch' | 'spreading';
   filters: FilterState;
   overlays: OverlayConfig;
   selectedStopId: string | null;
@@ -217,6 +234,7 @@ export type AppAction =
   | { type: 'TOGGLE_ROUTE_VISIBILITY'; payload: string }
   | { type: 'BATCH_CREATE_ROUTES'; payload: Route[] }
   | { type: 'BATCH_ASSIGN_STOPS'; payload: { assignments: { stopId: string; routeId: string }[] } }
+  | { type: 'SET_SERVICE_MODE'; payload: 'mulch' | 'spreading' }
   | { type: 'SET_FILTERS'; payload: Partial<FilterState> }
   | { type: 'SET_OVERLAYS'; payload: Partial<OverlayConfig> }
   | { type: 'SET_SETTINGS'; payload: Partial<AppSettings> }
@@ -230,5 +248,5 @@ export type AppAction =
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_GEOCODING_PROGRESS'; payload: { progress: number; total: number } }
   | { type: 'SET_ROUTE_GEOMETRY'; payload: { routeId: string; geometry: GeoJSON.LineString } }
-  | { type: 'SET_ROUTE_STATS'; payload: { routeId: string; distanceMiles: number; durationMinutes: number } }
+  | { type: 'SET_ROUTE_STATS'; payload: { routeId: string; distanceMiles: number; durationMinutes: number; legStats?: { distanceMiles: number; durationMinutes: number }[] } }
   | { type: 'RESTORE_STATE'; payload: Partial<AppState> };

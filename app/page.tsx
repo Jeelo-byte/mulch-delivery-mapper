@@ -12,11 +12,13 @@ import { DriveMode } from '@/src/components/DriveMode';
 import { BottomSheet } from '@/src/components/BottomSheet';
 import { AddStopForm } from '@/src/components/AddStopForm';
 import { SettingsModal } from '@/src/components/SettingsModal';
-import { useAppState } from '@/src/lib/store';
+import { useAppState, useAppDispatch } from '@/src/lib/store';
 import type { DeliveryStop } from '@/src/lib/types';
+import LZString from 'lz-string';
 
 export default function Home() {
   const state = useAppState();
+  const dispatch = useAppDispatch();
   const [showUploader, setShowUploader] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [detailStop, setDetailStop] = useState<DeliveryStop | null>(null);
@@ -26,12 +28,29 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsMobile(window.innerWidth < 768);
       const handleResize = () => setIsMobile(window.innerWidth < 768);
       window.addEventListener('resize', handleResize);
+
+      // Check for share link
+      const params = new URLSearchParams(window.location.search);
+      const share = params.get('share');
+      if (share) {
+        try {
+          const decoded = LZString.decompressFromEncodedURIComponent(share);
+          if (decoded) {
+            dispatch({ type: 'RESTORE_STATE', payload: JSON.parse(decoded) });
+            window.history.replaceState({}, '', window.location.pathname);
+          }
+        } catch (e) {
+          console.error('Failed to parse share link', e);
+        }
+      }
+
       return () => window.removeEventListener('resize', handleResize);
     }
-  }, []);
+  }, [dispatch]);
 
   const handleUploadComplete = useCallback(() => {
     setShowUploader(false);
@@ -47,67 +66,57 @@ export default function Home() {
 
   const hasData = state.stopOrder.length > 0;
 
-  // Show uploader if no data and never uploaded, or user requested
-  if (!hasData && !showUploader) {
-    // Check if we just haven't loaded from storage yet — brief delay
-    return (
-      <div className="app-layout">
-        <Header onUploadClick={() => setShowUploader(true)} onSettingsClick={() => setShowSettings(true)} />
-        <CSVUploader onComplete={handleUploadComplete} />
-      </div>
-    );
-  }
-
-  if (showUploader) {
-    return (
-      <div className="app-layout">
-        <Header onUploadClick={() => setShowUploader(true)} onSettingsClick={() => setShowSettings(true)} />
-        <CSVUploader onComplete={handleUploadComplete} />
-      </div>
-    );
-  }
+  // Ensure we consistently render the overall app structure
+  const showMainContent = hasData && !showUploader;
 
   return (
     <div className="app-layout">
       <Header onUploadClick={() => setShowUploader(true)} onSettingsClick={() => setShowSettings(true)} />
-      <FilterBar />
 
-      <div className="app-main">
-        {/* Desktop/Tablet sidebar */}
-        {!isMobile && (
-          <Sidebar
-            collapsed={sidebarCollapsed}
-            onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
-            onStopSelect={handleStopSelect}
-            onStopDetail={handleStopDetail}
-            onAddStop={() => setShowAddStop(true)}
-          />
-        )}
+      {!showMainContent ? (
+        <CSVUploader onComplete={handleUploadComplete} />
+      ) : (
+        <>
+          <FilterBar />
 
-        {/* Map */}
-        <MapView onStopClick={handleStopSelect} onStopDetail={handleStopDetail} />
+          <div className="app-main">
+            {/* Desktop/Tablet sidebar */}
+            {!isMobile && (
+              <Sidebar
+                collapsed={sidebarCollapsed}
+                onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+                onStopSelect={handleStopSelect}
+                onStopDetail={handleStopDetail}
+                onAddStop={() => setShowAddStop(true)}
+              />
+            )}
 
-        {/* Mobile bottom sheet */}
-        {isMobile && (
-          <BottomSheet>
-            <Sidebar
-              collapsed={false}
-              onToggle={() => { }}
-              onStopSelect={handleStopSelect}
-              onStopDetail={handleStopDetail}
-              onAddStop={() => setShowAddStop(true)}
-            />
-          </BottomSheet>
-        )}
-      </div>
+            {/* Map */}
+            <MapView onStopClick={handleStopSelect} onStopDetail={handleStopDetail} />
 
-      {/* Drive mode overlay */}
-      <AnimatePresence>
-        {state.isDriveMode && <DriveMode />}
-      </AnimatePresence>
+            {/* Mobile bottom sheet */}
+            {isMobile && (
+              <BottomSheet>
+                <Sidebar
+                  collapsed={false}
+                  onToggle={() => { }}
+                  onStopSelect={handleStopSelect}
+                  onStopDetail={handleStopDetail}
+                  onAddStop={() => setShowAddStop(true)}
+                />
+              </BottomSheet>
+            )}
+          </div>
 
-      {/* Order detail modal */}
-      <OrderDetailModal stop={detailStop} onClose={() => setDetailStop(null)} />
+          {/* Drive mode overlay */}
+          <AnimatePresence>
+            {state.isDriveMode && <DriveMode />}
+          </AnimatePresence>
+
+          {/* Order detail modal */}
+          <OrderDetailModal stop={detailStop} onClose={() => setDetailStop(null)} />
+        </>
+      )}
 
       {/* Add stop modal */}
       <AnimatePresence>

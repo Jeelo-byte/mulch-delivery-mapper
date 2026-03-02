@@ -35,6 +35,24 @@ function extractPlacementInstructions(modifiers: string): string[] {
 }
 
 /**
+ * Normalize address to improve matching for separate Spreading and Mulch orders
+ */
+function normalizeAddress(addr: string): string {
+    return addr.toLowerCase().trim()
+        .replace(/[.,]/g, '')
+        .replace(/\b(street)\b/g, 'st')
+        .replace(/\b(drive)\b/g, 'dr')
+        .replace(/\b(avenue)\b/g, 'ave')
+        .replace(/\b(road)\b/g, 'rd')
+        .replace(/\b(lane)\b/g, 'ln')
+        .replace(/\b(court)\b/g, 'ct')
+        .replace(/\b(circle)\b/g, 'cir')
+        .replace(/\b(trail)\b/g, 'trl')
+        .replace(/\b(place)\b/g, 'pl')
+        .replace(/\s+/g, ' ');
+}
+
+/**
  * Parse a CSV file string into raw rows and parsed line items.
  */
 export function parseCSV(csvString: string): { raw: RawCSVRow[]; lineItems: ParsedLineItem[] } {
@@ -83,8 +101,8 @@ export function aggregateStops(lineItems: ParsedLineItem[]): { stops: Record<str
         // Skip donations and test transactions
         if (item.itemName === 'Donation') continue;
 
-        // Group by normalized address + postal code
-        const key = `${item.address.toLowerCase().trim()}|${item.postalCode.trim()}`;
+        // Group by normalized address + postal code to catch "orphaned spreading"
+        const key = `${normalizeAddress(item.address)}|${item.postalCode.trim()}`;
         if (!stopMap.has(key)) {
             stopMap.set(key, []);
         }
@@ -143,6 +161,10 @@ export function aggregateStops(lineItems: ParsedLineItem[]): { stops: Record<str
         // Collect all unique order IDs for this address
         const orderIds = [...new Set(items.map((i) => i.orderId))];
 
+        const hasFrontWalk = items.some(i => i.placementInstructions.some(p => p.toLowerCase().includes('front walk')));
+        const hasSideHouse = items.some(i => i.placementInstructions.some(p => p.toLowerCase().includes('side of house')));
+        const hasCriticalNote = notes.length > 15;
+
         stops[id] = {
             id,
             orderId: orderIds.join(', '),
@@ -162,8 +184,12 @@ export function aggregateStops(lineItems: ParsedLineItem[]): { stops: Record<str
             fulfillmentNotes: notes,
             isHotshot: false,
             isDisabled: false,
+            hasFrontWalk,
+            hasSideHouse,
+            hasCriticalNote,
             allLineItems: items,
             routeId: null,
+            spreadingRouteId: null,
         };
         stopOrder.push(id);
     }

@@ -529,6 +529,22 @@ select.input {
   z-index: 20;
 }
 
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 30;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover, .sidebar-resizer:active {
+  background: var(--accent);
+}
+
 .sidebar-inner {
   width: 380px;
   height: 100%;

@@ -1,4 +1,5 @@
 import type { DeliveryStop, OptimizationMode } from './types';
+import { featureCollection, point, clustersKmeans, centerOfMass } from '@turf/turf';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
 
@@ -68,7 +69,8 @@ function toRad(deg: number): number {
  */
 export async function optimizeRoute(
     stops: DeliveryStop[],
-    mode: OptimizationMode = 'distance'
+    mode: OptimizationMode = 'distance',
+    depotCoords?: [number, number] | null
 ): Promise<{ orderedIds: string[]; geometry: GeoJSON.LineString | null }> {
     const stopsWithCoords = stops.filter((s) => s.coordinates);
 
@@ -78,23 +80,75 @@ export async function optimizeRoute(
 
     // Mapbox Optimization API supports max 12 coordinates
     if (stopsWithCoords.length > 12) {
-        const orderedIds = nearestNeighborSort(stopsWithCoords);
-        return { orderedIds, geometry: null };
+        const numClusters = Math.ceil(stopsWithCoords.length / 10);
+        const points = featureCollection(stopsWithCoords.map(s => point(s.coordinates as [number, number], { id: s.id })));
+
+        // Turf.js clustering workaround
+        const clustered = clustersKmeans(points, { numberOfClusters: numClusters });
+        const clusterMap = new Map<number, typeof stopsWithCoords>();
+
+        clustered.features.forEach(f => {
+            const cluster = f.properties.cluster;
+            if (cluster === undefined) return;
+            if (!clusterMap.has(cluster)) clusterMap.set(cluster, []);
+            const stop = stopsWithCoords.find(s => s.id === f.properties.id);
+            if (stop) clusterMap.get(cluster)!.push(stop);
+        });
+
+        const clusters = Array.from(clusterMap.values());
+
+        const clusterCentroids = clusters.map(c => {
+            const pts = featureCollection(c.map(s => point(s.coordinates as [number, number])));
+            const center = centerOfMass(pts);
+            return center.geometry.coordinates as [number, number];
+        });
+
+        const tempStops = clusterCentroids.map((cCoords, i) => ({ id: i.toString(), coordinates: cCoords } as DeliveryStop));
+        const orderedClusterIndices = nearestNeighborSort(tempStops).map(Number);
+
+        const allOrderedIds: string[] = [];
+
+        // Execute sequentially to preserve cluster order, but optimization inside clusters is parallelized conceptually
+        // Wait, for deterministic behavior, let's execute sequentially
+        for (const idx of orderedClusterIndices) {
+            const clusterStops = clusters[idx];
+            if (clusterStops.length > 12) {
+                allOrderedIds.push(...nearestNeighborSort(clusterStops));
+            } else {
+                const res = await callOptimizationApi(clusterStops, mode, depotCoords);
+                allOrderedIds.push(...res.orderedIds);
+            }
+        }
+
+        const stitchedGeometry = await stitchGeometries(allOrderedIds.map(id => stopsWithCoords.find(s => s.id === id)!));
+        return { orderedIds: allOrderedIds, geometry: stitchedGeometry };
     }
 
+    return await callOptimizationApi(stopsWithCoords, mode, depotCoords);
+}
+
+async function callOptimizationApi(
+    stops: DeliveryStop[],
+    mode: OptimizationMode,
+    depotCoords?: [number, number] | null
+): Promise<{ orderedIds: string[]; geometry: GeoJSON.LineString | null }> {
     try {
         const profile = mode === 'duration' ? 'mapbox/driving-traffic' : 'mapbox/driving';
-        const coordinates = stopsWithCoords
-            .map((s) => `${s.coordinates![0]},${s.coordinates![1]}`)
-            .join(';');
+
+        const coordsArr: string[] = [];
+        if (depotCoords) {
+            coordsArr.push(`${depotCoords[0]},${depotCoords[1]}`);
+        }
+        stops.forEach((s) => coordsArr.push(`${s.coordinates![0]},${s.coordinates![1]}`));
+
+        const coordinates = coordsArr.join(';');
 
         const url = `https://api.mapbox.com/optimized-trips/v1/${profile}/${coordinates}?access_token=${MAPBOX_TOKEN}&geometries=geojson&overview=full&roundtrip=false&source=first`;
 
         const response = await fetch(url);
         if (!response.ok) {
             console.error('Optimization API error:', response.status);
-            const orderedIds = nearestNeighborSort(stopsWithCoords);
-            return { orderedIds, geometry: null };
+            return { orderedIds: nearestNeighborSort(stops, depotCoords || undefined), geometry: null };
         }
 
         const data = await response.json();
@@ -102,46 +156,64 @@ export async function optimizeRoute(
             const trip = data.trips[0];
             const waypoints = data.waypoints as Array<{ waypoint_index: number; trips_index: number }>;
 
-            // Map waypoint order back to stop IDs
-            const orderedIds = waypoints
-                .sort((a, b) => a.waypoint_index - b.waypoint_index)
-                .map((wp, idx) => stopsWithCoords[idx].id);
+            const reordered: string[] = [];
+            const sortedWaypoints = [...waypoints].sort((a, b) => a.trips_index - b.trips_index);
 
-            // Actually we need to reorder based on waypoint_index
-            const reordered: string[] = new Array(stopsWithCoords.length);
-            waypoints.forEach((wp, originalIdx) => {
-                reordered[wp.waypoint_index] = stopsWithCoords[originalIdx].id;
-            });
+            for (const wp of sortedWaypoints) {
+                if (depotCoords && wp.waypoint_index === 0) continue;
+                const originalStopIdx = depotCoords ? wp.waypoint_index - 1 : wp.waypoint_index;
+                if (originalStopIdx >= 0 && originalStopIdx < stops.length) {
+                    reordered.push(stops[originalStopIdx].id);
+                }
+            }
 
             return {
-                orderedIds: reordered.filter(Boolean),
+                orderedIds: reordered,
                 geometry: trip.geometry as GeoJSON.LineString,
             };
         }
 
-        const orderedIds = nearestNeighborSort(stopsWithCoords);
-        return { orderedIds, geometry: null };
+        return { orderedIds: nearestNeighborSort(stops, depotCoords || undefined), geometry: null };
     } catch (error) {
         console.error('Optimization error:', error);
-        const orderedIds = nearestNeighborSort(stopsWithCoords);
-        return { orderedIds, geometry: null };
+        return { orderedIds: nearestNeighborSort(stops, depotCoords || undefined), geometry: null };
     }
+}
+
+async function stitchGeometries(orderedStops: DeliveryStop[]): Promise<GeoJSON.LineString | null> {
+    const coords: [number, number][] = [];
+    const chunkSize = 24;
+    for (let i = 0; i < orderedStops.length; i += chunkSize) {
+        const chunk = orderedStops.slice(i, i + chunkSize + 1);
+        if (chunk.length < 2) continue;
+        const geom = await getRouteDirections(chunk);
+        if (geom) {
+            if (coords.length > 0) {
+                coords.push(...(geom.coordinates.slice(1) as [number, number][]));
+            } else {
+                coords.push(...(geom.coordinates as [number, number][]));
+            }
+        }
+    }
+    return coords.length > 0 ? { type: 'LineString', coordinates: coords } : null;
 }
 
 /**
  * Get driving directions (route line) between stops using Mapbox Directions API.
  */
 export async function getRouteDirections(
-    stops: DeliveryStop[]
+    stops: DeliveryStop[],
+    depotCoords?: [number, number] | null
 ): Promise<GeoJSON.LineString | null> {
     const stopsWithCoords = stops.filter((s) => s.coordinates);
-    if (stopsWithCoords.length < 2) return null;
 
-    // Directions API supports max 25 coordinates
-    const coords = stopsWithCoords
-        .slice(0, 25)
-        .map((s) => `${s.coordinates![0]},${s.coordinates![1]}`)
-        .join(';');
+    const coordsArr: string[] = [];
+    if (depotCoords) coordsArr.push(`${depotCoords[0]},${depotCoords[1]}`);
+    stopsWithCoords.slice(0, 24).forEach((s) => coordsArr.push(`${s.coordinates![0]},${s.coordinates![1]}`));
+
+    if (coordsArr.length < 2) return null;
+
+    const coords = coordsArr.join(';');
 
     try {
         const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${coords}?access_token=${MAPBOX_TOKEN}&geometries=geojson&overview=full`;

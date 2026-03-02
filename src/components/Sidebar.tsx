@@ -37,6 +37,7 @@ export function Sidebar({ collapsed, onToggle, onStopSelect, onStopDetail, onAdd
     const dispatch = useAppDispatch();
     const [tab, setTab] = useState<Tab>('orders');
     const [search, setSearch] = useState('');
+    const [sidebarWidth, setSidebarWidth] = useState(380);
 
     const filteredStops = useMemo(() => {
         let stops = state.stopOrder.map((id) => state.stops[id]).filter(Boolean);
@@ -59,12 +60,13 @@ export function Sidebar({ collapsed, onToggle, onStopSelect, onStopDetail, onAdd
                 s.mulchOrders.some((o) => filters.mulchTypes.includes(o.mulchType))
             );
         }
-        if (filters.showHotshotsOnly) {
-            stops = stops.filter((s) => s.isHotshot);
+        // Mode filter
+        if (state.activeServiceMode === 'mulch') {
+            stops = stops.filter(s => s.mulchOrders && s.mulchOrders.length > 0);
+        } else if (state.activeServiceMode === 'spreading') {
+            stops = stops.filter(s => s.spreadingOrder);
         }
-        if (!filters.showDisabled) {
-            stops = stops.filter((s) => !s.isDisabled);
-        }
+
         if (filters.vehicleId) {
             const route = Object.values(state.routes).find(
                 (r) => r.vehicleId === filters.vehicleId
@@ -83,201 +85,248 @@ export function Sidebar({ collapsed, onToggle, onStopSelect, onStopDetail, onAdd
         <>
             <motion.div
                 className="sidebar"
-                animate={{ width: collapsed ? 0 : 380 }}
+                animate={{ width: collapsed ? 0 : sidebarWidth }}
                 transition={{ duration: 0.3 }}
             >
                 {!collapsed && (
-                    <div className="sidebar-inner">
-                        {/* Tab navigation */}
-                        <div className="sidebar-tabs">
-                            <button
-                                onClick={() => setTab('orders')}
-                                className={`sidebar-tab ${tab === 'orders' ? 'sidebar-tab-active' : ''}`}
-                            >
-                                <List size={16} /> Orders
-                            </button>
-                            <button
-                                onClick={() => setTab('routes')}
-                                className={`sidebar-tab ${tab === 'routes' ? 'sidebar-tab-active' : ''}`}
-                            >
-                                <MapPin size={16} /> Routes
-                            </button>
-                            <button
-                                onClick={() => setTab('vehicles')}
-                                className={`sidebar-tab ${tab === 'vehicles' ? 'sidebar-tab-active' : ''}`}
-                            >
-                                <Package size={16} /> Vehicles
-                            </button>
-                        </div>
+                    <>
+                        <div className="sidebar-inner" style={{ width: sidebarWidth }}>
+                            {/* Global Service Mode Toggle */}
+                            <div className="sidebar-service-mode" style={{ display: 'flex', padding: '12px', gap: '8px', borderBottom: '1px solid var(--border)', background: 'var(--bg-card)' }}>
+                                <button
+                                    onClick={() => dispatch({ type: 'SET_SERVICE_MODE', payload: 'mulch' })}
+                                    className={`btn ${state.activeServiceMode === 'mulch' ? 'btn-primary' : 'btn-outline'}`}
+                                    style={{ flex: 1 }}
+                                >
+                                    <Package size={16} /> Mulch
+                                </button>
+                                <button
+                                    onClick={() => dispatch({ type: 'SET_SERVICE_MODE', payload: 'spreading' })}
+                                    className={`btn ${state.activeServiceMode === 'spreading' ? 'btn-primary' : 'btn-outline'}`}
+                                    style={{ flex: 1 }}
+                                >
+                                    <Layers size={16} /> Spreading
+                                </button>
+                            </div>
 
-                        {/* Overlay toggles - always visible */}
-                        <div className="overlay-toggles">
-                            <button
-                                onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showScoutName: !state.overlays.showScoutName } })}
-                                className={`overlay-toggle ${state.overlays.showScoutName ? 'overlay-toggle-active' : ''}`}
-                                title="Show Scout Names"
-                            >
-                                <Tag size={12} /> Scout
-                            </button>
-                            <button
-                                onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showBagCount: !state.overlays.showBagCount } })}
-                                className={`overlay-toggle ${state.overlays.showBagCount ? 'overlay-toggle-active' : ''}`}
-                                title="Show Bag Counts"
-                            >
-                                <Layers size={12} /> Bags
-                            </button>
-                            <button
-                                onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showSpecialInstructions: !state.overlays.showSpecialInstructions } })}
-                                className={`overlay-toggle ${state.overlays.showSpecialInstructions ? 'overlay-toggle-active' : ''}`}
-                                title="Show Instructions"
-                            >
-                                <MessageSquare size={12} /> Notes
-                            </button>
-                        </div>
+                            {/* Tab navigation */}
+                            <div className="sidebar-tabs">
+                                <button
+                                    onClick={() => setTab('orders')}
+                                    className={`sidebar-tab ${tab === 'orders' ? 'sidebar-tab-active' : ''}`}
+                                >
+                                    <List size={16} /> Orders
+                                </button>
+                                <button
+                                    onClick={() => setTab('routes')}
+                                    className={`sidebar-tab ${tab === 'routes' ? 'sidebar-tab-active' : ''}`}
+                                >
+                                    <MapPin size={16} /> Routes
+                                </button>
+                                <button
+                                    onClick={() => setTab('vehicles')}
+                                    className={`sidebar-tab ${tab === 'vehicles' ? 'sidebar-tab-active' : ''}`}
+                                >
+                                    <Package size={16} /> Vehicles
+                                </button>
+                            </div>
 
-                        {/* Tab content */}
-                        <div className="sidebar-content">
-                            <AnimatePresence mode="wait">
-                                {tab === 'orders' && (
-                                    <motion.div
-                                        key="orders"
-                                        initial={{ opacity: 0, x: -20 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        exit={{ opacity: 0, x: 20 }}
-                                    >
-                                        <div className="search-wrapper">
-                                            <Search size={16} className="search-icon" />
-                                            <input
-                                                value={search}
-                                                onChange={(e) => setSearch(e.target.value)}
-                                                placeholder="Search orders..."
-                                                className="search-input"
-                                            />
-                                            <button onClick={onAddStop} className="btn btn-xs btn-primary search-add-btn" title="Add manual stop">
-                                                +
-                                            </button>
-                                        </div>
+                            {/* Overlay toggles - always visible */}
+                            <div className="overlay-toggles">
+                                <button
+                                    onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showScoutName: !state.overlays.showScoutName } })}
+                                    className={`overlay-toggle ${state.overlays.showScoutName ? 'overlay-toggle-active' : ''}`}
+                                    title="Show Scout Names"
+                                >
+                                    <Tag size={12} /> Scout
+                                </button>
+                                <button
+                                    onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showBagCount: !state.overlays.showBagCount } })}
+                                    className={`overlay-toggle ${state.overlays.showBagCount ? 'overlay-toggle-active' : ''}`}
+                                    title="Show Bag Counts"
+                                >
+                                    <Layers size={12} /> Bags
+                                </button>
+                                <button
+                                    onClick={() => dispatch({ type: 'SET_OVERLAYS', payload: { showSpecialInstructions: !state.overlays.showSpecialInstructions } })}
+                                    className={`overlay-toggle ${state.overlays.showSpecialInstructions ? 'overlay-toggle-active' : ''}`}
+                                    title="Show Instructions"
+                                >
+                                    <MessageSquare size={12} /> Notes
+                                </button>
+                            </div>
 
-                                        <div className="order-list">
-                                            {filteredStops.map((stop) => (
-                                                <div
-                                                    key={stop.id}
-                                                    className={`order-card ${state.selectedStopId === stop.id ? 'order-card-selected' : ''} ${stop.isHotshot ? 'order-card-hotshot' : ''} ${stop.isDisabled ? 'order-card-disabled' : ''}`}
-                                                    onClick={() => {
-                                                        dispatch({ type: 'SELECT_STOP', payload: stop.id });
-                                                        onStopSelect(stop);
-                                                    }}
-                                                >
-                                                    <div className="order-card-header">
-                                                        <span className="order-card-name">
-                                                            {stop.isDisabled && <Ban size={12} style={{ marginRight: 4, opacity: 0.5 }} />}
-                                                            {stop.recipientName}
-                                                        </span>
-                                                        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                                                            {stop.isHotshot && (
-                                                                <span className="hotshot-badge" title="Hotshot - far from main cluster">
-                                                                    <Flame size={12} /> Hotshot
+                            {/* Tab content */}
+                            <div className="sidebar-content">
+                                <AnimatePresence mode="wait">
+                                    {tab === 'orders' && (
+                                        <motion.div
+                                            key="orders"
+                                            initial={{ opacity: 0, x: -20 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 20 }}
+                                        >
+                                            <div className="search-wrapper">
+                                                <Search size={16} className="search-icon" />
+                                                <input
+                                                    value={search}
+                                                    onChange={(e) => setSearch(e.target.value)}
+                                                    placeholder="Search orders..."
+                                                    className="search-input"
+                                                />
+                                                <button onClick={onAddStop} className="btn btn-xs btn-primary search-add-btn" title="Add manual stop">
+                                                    +
+                                                </button>
+                                            </div>
+
+                                            <div className="order-list">
+                                                {filteredStops.map((stop) => {
+                                                    const currentRouteId = state.activeServiceMode === 'spreading' ? stop.spreadingRouteId : stop.routeId;
+                                                    return (
+                                                        <div
+                                                            key={stop.id}
+                                                            className={`order-card ${state.selectedStopId === stop.id ? 'order-card-selected' : ''} ${stop.isHotshot ? 'order-card-hotshot' : ''} ${stop.isDisabled ? 'order-card-disabled' : ''}`}
+                                                            onClick={() => {
+                                                                dispatch({ type: 'SELECT_STOP', payload: stop.id });
+                                                                onStopSelect(stop);
+                                                            }}
+                                                        >
+                                                            <div className="order-card-header">
+                                                                <span className="order-card-name">
+                                                                    {stop.isDisabled && <Ban size={12} style={{ marginRight: 4, opacity: 0.5 }} />}
+                                                                    {stop.recipientName}
                                                                 </span>
-                                                            )}
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    dispatch({ type: 'TOGGLE_STOP_DISABLED', payload: stop.id });
-                                                                }}
-                                                                className={`btn btn-xs btn-ghost ${stop.isDisabled ? 'btn-active' : ''}`}
-                                                                title={stop.isDisabled ? 'Enable stop' : 'Disable stop'}
-                                                            >
-                                                                {stop.isDisabled ? <EyeOff size={12} /> : <Eye size={12} />}
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                    <p className="order-card-address">{stop.fullAddress}</p>
-                                                    <div className="order-card-meta">
-                                                        {stop.mulchOrders.map((o, i) => (
-                                                            <span
-                                                                key={i}
-                                                                className={`mulch-badge-sm mulch-${o.mulchType.toLowerCase().replace(/\s+/g, '-')}`}
-                                                            >
-                                                                {o.quantity}× {o.mulchType}
-                                                            </span>
-                                                        ))}
-                                                        {stop.spreadingOrder && (
-                                                            <span className="mulch-badge-sm mulch-spreading">
-                                                                🧹 Spread {stop.spreadingOrder.quantity}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <div className="order-card-footer">
-                                                        <span className="order-card-scout">
-                                                            Scout: {stop.mulchOrders[0]?.scoutName || 'Unknown'}
-                                                        </span>
-                                                        <div style={{ display: 'flex', gap: 4 }}>
-                                                            {/* Assign to route dropdown */}
-                                                            {routes.length > 0 && !stop.isDisabled && !stop.routeId && (
-                                                                <select
-                                                                    className="input input-xs"
-                                                                    value=""
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    onChange={(e) => {
-                                                                        e.stopPropagation();
-                                                                        if (e.target.value) {
-                                                                            dispatch({
-                                                                                type: 'ASSIGN_STOP_TO_ROUTE',
-                                                                                payload: { stopId: stop.id, routeId: e.target.value },
-                                                                            });
-                                                                        }
-                                                                    }}
-                                                                >
-                                                                    <option value="">Assign...</option>
-                                                                    {routes.map(r => (
-                                                                        <option key={r.id} value={r.id}>{r.name}</option>
-                                                                    ))}
-                                                                </select>
-                                                            )}
-                                                            {stop.routeId && (
-                                                                <span className="route-assigned-badge" style={{ color: state.routes[stop.routeId]?.color }}>
-                                                                    {state.routes[stop.routeId]?.name}
+                                                                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                                                    {stop.isHotshot && (
+                                                                        <span className="hotshot-badge" title="Hotshot - far from main cluster">
+                                                                            <Flame size={12} /> Hotshot
+                                                                        </span>
+                                                                    )}
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            dispatch({ type: 'TOGGLE_STOP_DISABLED', payload: stop.id });
+                                                                        }}
+                                                                        className={`btn btn-xs btn-ghost ${stop.isDisabled ? 'btn-active' : ''}`}
+                                                                        title={stop.isDisabled ? 'Enable stop' : 'Disable stop'}
+                                                                    >
+                                                                        {stop.isDisabled ? <EyeOff size={12} /> : <Eye size={12} />}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                            <p className="order-card-address">{stop.fullAddress}</p>
+                                                            <div className="order-card-meta">
+                                                                {stop.mulchOrders.map((o, i) => (
+                                                                    <span
+                                                                        key={i}
+                                                                        className={`mulch-badge-sm mulch-${o.mulchType.toLowerCase().replace(/\s+/g, '-')}`}
+                                                                    >
+                                                                        {o.quantity}× {o.mulchType}
+                                                                    </span>
+                                                                ))}
+                                                                {stop.spreadingOrder && (
+                                                                    <span className="mulch-badge-sm mulch-spreading">
+                                                                        🧹 Spread {stop.spreadingOrder.quantity}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="order-card-footer">
+                                                                <span className="order-card-scout">
+                                                                    Scout: {stop.mulchOrders[0]?.scoutName || 'Unknown'}
                                                                 </span>
-                                                            )}
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    onStopDetail(stop);
-                                                                }}
-                                                                className="btn btn-xs btn-outline"
-                                                            >
-                                                                Details
-                                                            </button>
+                                                                <div style={{ display: 'flex', gap: 4 }}>
+                                                                    {/* Assign to route dropdown */}
+                                                                    {routes.length > 0 && !stop.isDisabled && !currentRouteId && (
+                                                                        <select
+                                                                            className="input input-xs"
+                                                                            value=""
+                                                                            onClick={(e) => e.stopPropagation()}
+                                                                            onChange={(e) => {
+                                                                                e.stopPropagation();
+                                                                                if (e.target.value) {
+                                                                                    dispatch({
+                                                                                        type: 'ASSIGN_STOP_TO_ROUTE',
+                                                                                        payload: { stopId: stop.id, routeId: e.target.value },
+                                                                                    });
+                                                                                }
+                                                                            }}
+                                                                        >
+                                                                            <option value="">Assign...</option>
+                                                                            {routes.map(r => (
+                                                                                <option key={r.id} value={r.id}>{r.name}</option>
+                                                                            ))}
+                                                                        </select>
+                                                                    )}
+                                                                    {currentRouteId && (
+                                                                        <span className="route-assigned-badge" style={{ color: state.routes[currentRouteId]?.color }}>
+                                                                            {state.routes[currentRouteId]?.name}
+                                                                        </span>
+                                                                    )}
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            onStopDetail(stop);
+                                                                        }}
+                                                                        className="btn btn-xs btn-outline"
+                                                                    >
+                                                                        Details
+                                                                    </button>
+                                                                </div>
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </motion.div>
-                                )}
-                                {tab === 'routes' && (
-                                    <motion.div
-                                        key="routes"
-                                        initial={{ opacity: 0, x: -20 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        exit={{ opacity: 0, x: 20 }}
-                                    >
-                                        <RouteEditor />
-                                    </motion.div>
-                                )}
-                                {tab === 'vehicles' && (
-                                    <motion.div
-                                        key="vehicles"
-                                        initial={{ opacity: 0, x: -20 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        exit={{ opacity: 0, x: 20 }}
-                                    >
-                                        <VehicleManager />
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
+                                                    );
+                                                })}
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                    {tab === 'routes' && (
+                                        <motion.div
+                                            key="routes"
+                                            initial={{ opacity: 0, x: -20 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 20 }}
+                                        >
+                                            <RouteEditor />
+                                        </motion.div>
+                                    )}
+                                    {tab === 'vehicles' && (
+                                        <motion.div
+                                            key="vehicles"
+                                            initial={{ opacity: 0, x: -20 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 20 }}
+                                        >
+                                            <VehicleManager />
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+                            </div>
                         </div>
-                    </div>
+                        {/* Resizer Handle */}
+                        <div
+                            className="sidebar-resizer"
+                            onMouseDown={(e) => {
+                                e.preventDefault();
+                                const startX = e.clientX;
+                                const startWidth = sidebarWidth;
+
+                                const handleMouseMove = (me: MouseEvent) => {
+                                    let newWidth = startWidth + (me.clientX - startX);
+                                    if (newWidth < 250) newWidth = 250;
+                                    if (newWidth > 700) newWidth = 700;
+                                    setSidebarWidth(newWidth);
+                                };
+
+                                const handleMouseUp = () => {
+                                    window.removeEventListener('mousemove', handleMouseMove);
+                                    window.removeEventListener('mouseup', handleMouseUp);
+                                };
+
+                                window.addEventListener('mousemove', handleMouseMove);
+                                window.addEventListener('mouseup', handleMouseUp);
+                            }}
+                        />
+                    </>
                 )}
             </motion.div>
 

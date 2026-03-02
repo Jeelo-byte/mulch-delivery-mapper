@@ -17,6 +17,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     const [defaultCap, setDefaultCap] = useState(state.settings.defaultCapacity.toString());
     const [depot, setDepot] = useState(state.settings.depotAddress);
 
+    const [enforceWeightLimits, setEnforceWeightLimits] = useState(state.settings.enforceWeightLimits);
+    const [laborTime, setLaborTime] = useState(state.settings.laborTimePerSpreadBag.toString());
+    const [generationMode, setGenerationMode] = useState(state.settings.routeGenerationMode);
+
+    // new time schedule bits
+    const [startTime, setStartTime] = useState(state.settings.startTime || '08:00');
+    const [lunchStart, setLunchStart] = useState(state.settings.lunchBreakStartTime || '12:00');
+    const [lunchDuration, setLunchDuration] = useState((state.settings.lunchBreakDuration || 30).toString());
+
     const handleSave = () => {
         dispatch({
             type: 'SET_SETTINGS',
@@ -24,6 +33,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 fuelCostPerMile: parseFloat(fuelCost) || 0.655,
                 defaultCapacity: parseInt(defaultCap) || 50,
                 depotAddress: depot,
+                enforceWeightLimits,
+                laborTimePerSpreadBag: parseInt(laborTime) || 3,
+                routeGenerationMode: generationMode,
+                startTime: startTime,
+                lunchBreakStartTime: lunchStart,
+                lunchBreakDuration: parseInt(lunchDuration) || 30,
             },
         });
         onClose();
@@ -114,6 +129,63 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                         onChange={(e) => setDepot(e.target.value)}
                                         className="input"
                                         placeholder="e.g. 123 Main St, Plano, TX 75023"
+                                    />
+                                </div>
+                                <div className="form-field form-field-full" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: 8 }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={enforceWeightLimits}
+                                        onChange={(e) => setEnforceWeightLimits(e.target.checked)}
+                                        id="enforceWeight"
+                                    />
+                                    <label htmlFor="enforceWeight" className="form-label" style={{ marginBottom: 0 }}>Enforce Vehicle Weight Limits</label>
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Labor Time per Spread Bag (mins)</label>
+                                    <input
+                                        type="number" min="1"
+                                        value={laborTime}
+                                        onChange={(e) => setLaborTime(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Route Generation Mode</label>
+                                    <select
+                                        value={generationMode}
+                                        onChange={(e) => setGenerationMode(e.target.value as 'Geographic' | 'By Scout' | 'Spreading Only')}
+                                        className="input"
+                                    >
+                                        <option value="Geographic">Geographic Clustering</option>
+                                        <option value="By Scout">By Scout to Credit</option>
+                                        <option value="Spreading Only">Spreading Only</option>
+                                    </select>
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Route Start Time</label>
+                                    <input
+                                        type="time"
+                                        value={startTime}
+                                        onChange={(e) => setStartTime(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Lunch Break Start Time</label>
+                                    <input
+                                        type="time"
+                                        value={lunchStart}
+                                        onChange={(e) => setLunchStart(e.target.value)}
+                                        className="input"
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label">Lunch Break Duration (mins)</label>
+                                    <input
+                                        type="number" min="0"
+                                        value={lunchDuration}
+                                        onChange={(e) => setLunchDuration(e.target.value)}
+                                        className="input"
                                     />
                                 </div>
                             </div>

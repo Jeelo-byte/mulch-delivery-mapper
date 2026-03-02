@@ -11,6 +11,12 @@ const defaultSettings = {
     depotCoords: null as [number, number] | null,
     defaultCapacity: 50,
     mapboxToken: '',
+    enforceWeightLimits: false,
+    laborTimePerSpreadBag: 3,
+    routeGenerationMode: 'Geographic' as const,
+    startTime: '08:00',
+    lunchBreakStartTime: '12:00',
+    lunchBreakDuration: 30,
 };
 
 const initialState: AppState = {
@@ -21,6 +27,7 @@ const initialState: AppState = {
     vehicles: {},
     routes: {},
     settings: defaultSettings,
+    activeServiceMode: 'mulch',
     filters: {
         mulchTypes: [],
         vehicleTypes: [],
@@ -57,6 +64,7 @@ function saveState(state: AppState) {
             vehicles: state.vehicles,
             routes: state.routes,
             settings: state.settings,
+            activeServiceMode: state.activeServiceMode,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
     } catch (e) {
@@ -127,11 +135,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
         case 'REMOVE_STOP': {
             const { [action.payload]: removedStop, ...remainingStops } = state.stops;
             const updRoutes = { ...state.routes };
-            if (removedStop?.routeId && updRoutes[removedStop.routeId]) {
-                updRoutes[removedStop.routeId] = {
-                    ...updRoutes[removedStop.routeId],
-                    stopIds: updRoutes[removedStop.routeId].stopIds.filter(id => id !== action.payload),
-                };
+            if (removedStop) {
+                [removedStop.routeId, removedStop.spreadingRouteId].forEach(rId => {
+                    if (rId && updRoutes[rId]) {
+                        updRoutes[rId] = {
+                            ...updRoutes[rId],
+                            stopIds: updRoutes[rId].stopIds.filter(id => id !== action.payload),
+                        };
+                    }
+                });
             }
             return {
                 ...state,
@@ -150,15 +162,20 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
             // If being disabled and in a route, remove from route
             let newRoutes = state.routes;
-            if (!wasDisabled && stop.routeId && state.routes[stop.routeId]) {
-                newRoutes = {
-                    ...state.routes,
-                    [stop.routeId]: {
-                        ...state.routes[stop.routeId],
-                        stopIds: state.routes[stop.routeId].stopIds.filter(id => id !== action.payload),
-                    },
-                };
+            if (!wasDisabled) {
+                [stop.routeId, stop.spreadingRouteId].forEach(rId => {
+                    if (rId && newRoutes[rId]) {
+                        newRoutes = {
+                            ...newRoutes,
+                            [rId]: {
+                                ...newRoutes[rId],
+                                stopIds: newRoutes[rId].stopIds.filter(id => id !== action.payload),
+                            },
+                        };
+                    }
+                });
                 updatedStop.routeId = null;
+                updatedStop.spreadingRouteId = null;
             }
 
             return {
@@ -190,7 +207,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
             for (const route of routesToRemove) {
                 for (const stopId of route.stopIds) {
                     if (updatedStops[stopId]) {
-                        updatedStops[stopId] = { ...updatedStops[stopId], routeId: null };
+                        if (route.serviceMode === 'spreading') {
+                            updatedStops[stopId] = { ...updatedStops[stopId], spreadingRouteId: null };
+                        } else {
+                            updatedStops[stopId] = { ...updatedStops[stopId], routeId: null };
+                        }
                     }
                 }
                 delete updatedRoutes[route.id];
@@ -223,7 +244,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
             const newStops = { ...state.stops };
             for (const stopId of route.stopIds) {
                 if (newStops[stopId]) {
-                    newStops[stopId] = { ...newStops[stopId], routeId: null };
+                    if (route.serviceMode === 'spreading') {
+                        newStops[stopId] = { ...newStops[stopId], spreadingRouteId: null };
+                    } else {
+                        newStops[stopId] = { ...newStops[stopId], routeId: null };
+                    }
                 }
             }
             const { [action.payload]: __, ...remainingRoutes } = state.routes;
@@ -239,8 +264,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
             if (state.stops[stopId]?.isDisabled) return state;
 
             // Remove from current route if any
-            let updatedRoutes = { ...state.routes };
-            const currentRouteId = state.stops[stopId]?.routeId;
+            const updatedRoutes = { ...state.routes };
+            const routeKey = route.serviceMode === 'spreading' ? 'spreadingRouteId' : 'routeId';
+            const currentRouteId = state.stops[stopId]?.[routeKey];
             if (currentRouteId && updatedRoutes[currentRouteId]) {
                 updatedRoutes[currentRouteId] = {
                     ...updatedRoutes[currentRouteId],
@@ -262,7 +288,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                 routes: updatedRoutes,
                 stops: {
                     ...state.stops,
-                    [stopId]: { ...state.stops[stopId], routeId },
+                    [stopId]: { ...state.stops[stopId], [routeKey]: routeId },
                 },
             };
         }
@@ -271,6 +297,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
             const { stopId, routeId } = action.payload;
             const route = state.routes[routeId];
             if (!route) return state;
+            const routeKey = route.serviceMode === 'spreading' ? 'spreadingRouteId' : 'routeId';
             return {
                 ...state,
                 routes: {
@@ -282,7 +309,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                 },
                 stops: {
                     ...state.stops,
-                    [stopId]: { ...state.stops[stopId], routeId: null },
+                    [stopId]: { ...state.stops[stopId], [routeKey]: null },
                 },
             };
         }
@@ -308,6 +335,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
             const newDestStops = [...destRoute.stopIds.filter(id => id !== stopId)];
             newDestStops.splice(destIndex, 0, stopId);
 
+            const routeKey = destRoute.serviceMode === 'spreading' ? 'spreadingRouteId' : 'routeId';
+
             return {
                 ...state,
                 routes: {
@@ -317,7 +346,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                 },
                 stops: {
                     ...state.stops,
-                    [stopId]: { ...state.stops[stopId], routeId: destRouteId },
+                    [stopId]: { ...state.stops[stopId], [routeKey]: destRouteId },
                 },
             };
         }
@@ -348,8 +377,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
             const batchStops = { ...state.stops };
             for (const { stopId, routeId } of action.payload.assignments) {
                 if (batchStops[stopId]?.isDisabled) continue; // skip disabled
+                const route = batchRoutes[routeId];
+                if (!route) continue;
+                const routeKey = route.serviceMode === 'spreading' ? 'spreadingRouteId' : 'routeId';
+
                 // Remove from current route if assigned
-                const currentRouteId = batchStops[stopId]?.routeId;
+                const currentRouteId = batchStops[stopId]?.[routeKey];
                 if (currentRouteId && batchRoutes[currentRouteId]) {
                     batchRoutes[currentRouteId] = {
                         ...batchRoutes[currentRouteId],
@@ -367,11 +400,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
                     }
                 }
                 if (batchStops[stopId]) {
-                    batchStops[stopId] = { ...batchStops[stopId], routeId };
+                    batchStops[stopId] = { ...batchStops[stopId], [routeKey]: routeId };
                 }
             }
             return { ...state, routes: batchRoutes, stops: batchStops };
         }
+
+        case 'SET_SERVICE_MODE':
+            return { ...state, activeServiceMode: action.payload };
 
         case 'SET_FILTERS':
             return {
@@ -446,7 +482,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         }
 
         case 'SET_ROUTE_STATS': {
-            const { routeId, distanceMiles, durationMinutes } = action.payload;
+            const { routeId, distanceMiles, durationMinutes, legStats } = action.payload;
             return {
                 ...state,
                 routes: {
@@ -455,13 +491,18 @@ function appReducer(state: AppState, action: AppAction): AppState {
                         ...state.routes[routeId],
                         distanceMiles,
                         durationMinutes,
+                        legStats,
                     },
                 },
             };
         }
 
         case 'RESTORE_STATE':
-            return { ...state, ...action.payload };
+            return {
+                ...state,
+                ...action.payload,
+                settings: { ...defaultSettings, ...(action.payload.settings || {}) }
+            };
 
         default:
             return state;

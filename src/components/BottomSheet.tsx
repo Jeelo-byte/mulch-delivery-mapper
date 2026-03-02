@@ -19,6 +19,7 @@ export function BottomSheet({ children }: BottomSheetProps) {
     const [windowHeight, setWindowHeight] = useState(800);
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setWindowHeight(window.innerHeight);
         const handleResize = () => setWindowHeight(window.innerHeight);
         window.addEventListener('resize', handleResize);

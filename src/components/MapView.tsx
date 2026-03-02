@@ -58,16 +58,24 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 stops = stops.filter((s) => routeStopIds.has(s.id) || !s.routeId);
             }
         }
+        // Mode filter
+        if (state.activeServiceMode === 'mulch') {
+            stops = stops.filter(s => s.mulchOrders && s.mulchOrders.length > 0);
+        } else if (state.activeServiceMode === 'spreading') {
+            stops = stops.filter(s => s.spreadingOrder);
+        }
+
         const invisibleRouteIds = new Set(
             Object.values(state.routes).filter((r) => !r.visible).map((r) => r.id)
         );
         stops = stops.filter((s) => !s.routeId || !invisibleRouteIds.has(s.routeId!));
+
         return stops;
     }, [state]);
 
     const visibleRoutes = useMemo(() => {
-        return Object.values(state.routes).filter((r) => r.visible);
-    }, [state.routes]);
+        return Object.values(state.routes).filter((r) => r.visible && r.serviceMode === state.activeServiceMode);
+    }, [state.routes, state.activeServiceMode]);
 
     // Initialize map
     useEffect(() => {
@@ -81,7 +89,19 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         map.addControl(new mapboxgl.NavigationControl(), 'top-right');
         map.addControl(new mapboxgl.FullscreenControl(), 'top-right');
         mapRef.current = map;
-        return () => { map.remove(); mapRef.current = null; };
+
+        const resizeObserver = new ResizeObserver(() => {
+            if (mapRef.current) {
+                mapRef.current.resize();
+            }
+        });
+        resizeObserver.observe(mapContainer.current);
+
+        return () => {
+            resizeObserver.disconnect();
+            map.remove();
+            mapRef.current = null;
+        };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Update map style
@@ -93,20 +113,29 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
 
     // Create marker element
     const createMarkerEl = useCallback(
-        (stop: DeliveryStop) => {
+        (stop: DeliveryStop, routeIndex: number | null, isDimmed: boolean) => {
             const el = document.createElement('div');
             el.className = 'map-marker';
             const primaryMulch = stop.mulchOrders[0];
-            const color = primaryMulch ? MULCH_COLORS[primaryMulch.mulchType.toLowerCase()] || '#6b7280' : '#6b7280';
-            const route = stop.routeId ? state.routes[stop.routeId] : null;
+            let color = '#6b7280';
+            if (primaryMulch) {
+                color = MULCH_COLORS[primaryMulch.mulchType.toLowerCase()] || '#6b7280';
+            } else if (stop.spreadingOrder) {
+                color = '#6366f1';
+            }
+
+            const currentRouteId = state.activeServiceMode === 'spreading' ? stop.spreadingRouteId : stop.routeId;
+            const route = currentRouteId ? state.routes[currentRouteId] : null;
             const routeColor = route?.color;
             const isDisabled = stop.isDisabled;
             const markerColor = isDisabled ? '#9ca3af' : (routeColor || color);
-            const opacity = isDisabled ? '0.45' : '1';
+            const opacity = isDisabled || isDimmed ? '0.35' : '1';
+
+            const badgeContent = routeIndex !== null ? routeIndex : stop.totalBags;
 
             el.innerHTML = `
-        <div class="marker-pin" style="background-color: ${markerColor}; opacity: ${opacity}">
-          <span class="marker-count">${stop.totalBags}</span>
+        <div class="marker-pin" style="background-color: ${markerColor}; opacity: ${opacity}; ${isDimmed ? 'transform: scale(0.85);' : ''}">
+          <span class="marker-count">${badgeContent}</span>
         </div>
         ${stop.isHotshot && !isDisabled ? '<div class="marker-hotshot">🔥</div>' : ''}
       `;
@@ -131,7 +160,15 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 markersRef.current.get(stop.id)!.remove();
             }
 
-            const el = createMarkerEl(stop);
+            const currentRouteId = state.activeServiceMode === 'spreading' ? stop.spreadingRouteId : stop.routeId;
+            let routeIndex: number | null = null;
+            if (currentRouteId && state.routes[currentRouteId]) {
+                const idx = state.routes[currentRouteId].stopIds.indexOf(stop.id);
+                if (idx !== -1) routeIndex = idx + 1;
+            }
+
+            const isDimmed = state.selectedRouteId !== null && currentRouteId !== state.selectedRouteId;
+            const el = createMarkerEl(stop, routeIndex, isDimmed);
 
             el.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -139,16 +176,16 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 onStopClick(stop);
 
                 const selectedRoute = state.selectedRouteId ? state.routes[state.selectedRouteId] : null;
-                const currentRoute = stop.routeId ? state.routes[stop.routeId] : null;
+                const currentRouteObj = currentRouteId ? state.routes[currentRouteId] : null;
                 const isDisabled = stop.isDisabled;
 
                 let assignBtn = '';
-                if (selectedRoute && !isDisabled && stop.routeId !== selectedRoute.id) {
+                if (selectedRoute && !isDisabled && currentRouteId !== selectedRoute.id) {
                     assignBtn = `<button class="popup-assign-btn" id="popup-assign-${stop.id}" style="background:${selectedRoute.color}">
                         ➕ Add to ${selectedRoute.name}
                     </button>`;
-                } else if (currentRoute) {
-                    assignBtn = `<span class="popup-route-tag" style="color:${currentRoute.color}">🏷️ In: ${currentRoute.name}</span>`;
+                } else if (currentRouteObj) {
+                    assignBtn = `<span class="popup-route-tag" style="color:${currentRouteObj.color}">🏷️ In: ${currentRouteObj.name}</span>`;
                 }
 
                 if (popupRef.current) popupRef.current.remove();
@@ -269,6 +306,11 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
             routeSourcesRef.current.clear();
 
             for (const route of visibleRoutes) {
+                const isSelected = state.selectedRouteId === route.id;
+                const isDimmed = state.selectedRouteId !== null && !isSelected;
+                const opacity = isDimmed ? 0.2 : 0.8;
+                const width = isSelected ? 6 : 4;
+
                 if (route.routeGeometry) {
                     const sourceId = `route-${route.id}`;
                     map.addSource(sourceId, {
@@ -280,7 +322,7 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                         type: 'line',
                         source: sourceId,
                         layout: { 'line-join': 'round', 'line-cap': 'round' },
-                        paint: { 'line-color': route.color, 'line-width': 4, 'line-opacity': 0.8 },
+                        paint: { 'line-color': route.color, 'line-width': width, 'line-opacity': opacity },
                     });
                     routeSourcesRef.current.add(sourceId);
                 } else if (route.stopIds.length >= 2) {
@@ -305,7 +347,7 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                             type: 'line',
                             source: sourceId,
                             layout: { 'line-join': 'round', 'line-cap': 'round' },
-                            paint: { 'line-color': route.color, 'line-width': 3, 'line-opacity': 0.6, 'line-dasharray': [2, 2] },
+                            paint: { 'line-color': route.color, 'line-width': width - 1, 'line-opacity': opacity - 0.2, 'line-dasharray': [2, 2] },
                         });
                         routeSourcesRef.current.add(sourceId);
                     }
@@ -324,15 +366,17 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         if (!map || visibleStops.length === 0) return;
 
         const bounds = new mapboxgl.LngLatBounds();
-        for (const stop of visibleStops) {
+        const stopsToFit = state.selectedRouteId ? visibleStops.filter(s => s.routeId === state.selectedRouteId) : visibleStops;
+
+        for (const stop of stopsToFit) {
             if (stop.coordinates) bounds.extend(stop.coordinates);
         }
         if (state.settings.depotCoords) bounds.extend(state.settings.depotCoords);
 
         if (!bounds.isEmpty()) {
-            map.fitBounds(bounds, { padding: 60, maxZoom: 14 });
+            map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 800 });
         }
-    }, [visibleStops.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [visibleStops.length, state.selectedRouteId, state.stops]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Highlight selected stop
     useEffect(() => {
@@ -347,9 +391,49 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         }
     }, [state.selectedStopId, state.stops]);
 
+    // Toggle overlays
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map) return;
+
+        for (const marker of markersRef.current.values()) {
+            const el = marker.getElement();
+            const countEl = el.querySelector('.marker-count') as HTMLElement;
+            if (countEl) {
+                countEl.style.display = state.overlays.showBagCount ? 'block' : 'none';
+            }
+        }
+    }, [state.overlays, visibleStops]);
+
     return (
-        <div className="map-container">
-            <div ref={mapContainer} className="map-gl" />
+        <div style={{ flex: 1, position: 'relative' }}>
+            <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
+            <div style={{ position: 'absolute', bottom: 24, right: 24, background: 'var(--bg-card)', padding: '12px 16px', borderRadius: 'var(--radius)', boxShadow: 'var(--shadow-lg)', zIndex: 10, fontSize: 13, border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '400px', overflowY: 'auto' }}>
+                <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: 'var(--text-secondary)' }}>Legend</h4>
+                {state.activeServiceMode === 'mulch' ? (
+                    <>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['black'] }} /> Black Mulch</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['aromatic cedar'] }} /> Aromatic Cedar</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['fine shredded hardwood'] }} /> Hardwood</div>
+                    </>
+                ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: '#6366f1' }} /> Spreading Only</div>
+                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: '#9ca3af' }} /> Disabled</div>
+
+                {visibleRoutes.length > 0 && (
+                    <>
+                        <div style={{ margin: '4px 0', borderTop: '1px solid var(--border)' }} />
+                        <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: 'var(--text-secondary)' }}>Routes</h4>
+                        {visibleRoutes.map(r => (
+                            <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: r.color }} />
+                                <span style={{ maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.name}>{r.name}</span>
+                            </div>
+                        ))}
+                    </>
+                )}
+            </div>
             {state.isManualRouteMode && (
                 <div className="map-mode-indicator">
                     <span>📍 Manual Route Mode — Click markers to add to route</span>

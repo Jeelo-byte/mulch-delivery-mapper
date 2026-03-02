@@ -15,12 +15,36 @@ interface CSVUploaderProps {
 export function CSVUploader({ onComplete }: CSVUploaderProps) {
     const dispatch = useAppDispatch();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const jsonInputRef = useRef<HTMLInputElement>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState({ stage: '', percent: 0 });
 
+    const processJsonFile = useCallback(
+        async (file: File) => {
+            setIsProcessing(true);
+            setProgress({ stage: 'Loading saved plan...', percent: 50 });
+            try {
+                const text = await file.text();
+                const parsed = JSON.parse(text);
+                dispatch({ type: 'RESTORE_STATE', payload: parsed });
+                setProgress({ stage: 'Complete!', percent: 100 });
+                await new Promise((r) => setTimeout(r, 400));
+                onComplete();
+            } catch (err) {
+                console.error(err);
+                alert('Invalid JSON file.');
+                setIsProcessing(false);
+            }
+        },
+        [dispatch, onComplete]
+    );
+
     const processFile = useCallback(
         async (file: File) => {
+            if (file.name.endsWith('.json')) {
+                return processJsonFile(file);
+            }
             setIsProcessing(true);
             setProgress({ stage: 'Parsing CSV...', percent: 10 });
 
@@ -68,7 +92,7 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                 setIsProcessing(false);
             }
         },
-        [dispatch, onComplete]
+        [dispatch, onComplete, processJsonFile]
     );
 
     const handleDrop = useCallback(
@@ -76,8 +100,12 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
             e.preventDefault();
             setIsDragging(false);
             const file = e.dataTransfer.files[0];
-            if (file && file.name.endsWith('.csv')) {
-                processFile(file);
+            if (file) {
+                if (file.name.endsWith('.csv') || file.name.endsWith('.json')) {
+                    processFile(file);
+                } else {
+                    alert('Please upload a CSV or JSON file.');
+                }
             }
         },
         [processFile]
@@ -89,6 +117,14 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
             if (file) processFile(file);
         },
         [processFile]
+    );
+
+    const handleJsonSelect = useCallback(
+        (e: React.ChangeEvent<HTMLInputElement>) => {
+            const file = e.target.files?.[0];
+            if (file) processJsonFile(file);
+        },
+        [processJsonFile]
     );
 
     return (
@@ -146,16 +182,42 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                             onDrop={handleDrop}
                             onClick={() => fileInputRef.current?.click()}
                         >
-                            <Upload size={40} className="csv-dropzone-icon" />
-                            <p className="csv-dropzone-text">
-                                <strong>Click to upload</strong> or drag and drop
-                            </p>
-                            <p className="csv-dropzone-hint">CSV files from Square Online</p>
+                            <div className="csv-dropzone-actions" style={{ display: 'flex', gap: '2rem', justifyContent: 'center' }}>
+                                <div
+                                    className="upload-option"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', padding: '1rem', borderRadius: '0.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+                                >
+                                    <Upload size={40} className="csv-dropzone-icon" />
+                                    <p className="csv-dropzone-text" style={{ marginTop: '0.5rem' }}>
+                                        <strong>Upload CSV</strong>
+                                    </p>
+                                    <p className="csv-dropzone-hint">Square Online Export</p>
+                                </div>
+                                <div
+                                    className="upload-option"
+                                    onClick={() => jsonInputRef.current?.click()}
+                                    style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', padding: '1rem', borderRadius: '0.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
+                                >
+                                    <Upload size={40} className="csv-dropzone-icon" />
+                                    <p className="csv-dropzone-text" style={{ marginTop: '0.5rem' }}>
+                                        <strong>Upload JSON</strong>
+                                    </p>
+                                    <p className="csv-dropzone-hint">Saved Route Plan</p>
+                                </div>
+                            </div>
                             <input
                                 ref={fileInputRef}
                                 type="file"
                                 accept=".csv"
                                 onChange={handleFileSelect}
+                                className="sr-only"
+                            />
+                            <input
+                                ref={jsonInputRef}
+                                type="file"
+                                accept=".json,application/json"
+                                onChange={handleJsonSelect}
                                 className="sr-only"
                             />
                         </motion.div>

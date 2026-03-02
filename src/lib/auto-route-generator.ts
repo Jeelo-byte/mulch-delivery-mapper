@@ -14,7 +14,7 @@ function nextColor(): string {
     return color;
 }
 
-interface SmartAutoConfig {
+export interface SmartAutoConfig {
     /** Which vehicles to use, in priority order (typed first, hotshot last) */
     vehicleAssignments: {
         vehicleId: string;
@@ -22,6 +22,8 @@ interface SmartAutoConfig {
     }[];
     /** Depot coordinates for route starting point */
     depotCoords: [number, number] | null;
+    /** Generation Strategy */
+    strategy?: 'standard' | 'efficient';
 }
 
 interface AutoResult {
@@ -48,13 +50,19 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
     const routes: Route[] = [];
     const assignments: { stopId: string; routeId: string }[] = [];
 
+    const isSpreadingMode = state.activeServiceMode === 'spreading';
+
     // 1. Collect unassigned, non-disabled stops
-    const allStops = state.stopOrder
+    let allStops = state.stopOrder
         .map(id => state.stops[id])
         .filter(s => s && !s.routeId && !s.isDisabled);
 
+    if (isSpreadingMode) {
+        allStops = allStops.filter(s => s.spreadingOrder && s.spreadingOrder.quantity > 0);
+    }
+
     if (allStops.length === 0) {
-        errors.push('No unassigned stops available.');
+        errors.push(isSpreadingMode ? 'No unassigned spreading stops available.' : 'No unassigned stops available.');
         return { routes, assignments, errors, summary };
     }
 
@@ -64,49 +72,58 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
     const typedVehicles = config.vehicleAssignments.filter(a => a.mulchType);
     const hotshotVehicles = config.vehicleAssignments.filter(a => !a.mulchType);
 
-    for (const { vehicleId, mulchType } of typedVehicles) {
-        const vehicle = state.vehicles[vehicleId];
-        if (!vehicle) {
-            errors.push(`Vehicle ${vehicleId} not found.`);
-            continue;
+    const typeGroups = new Map<string, typeof typedVehicles>();
+    for (const tv of typedVehicles) {
+        if (!typeGroups.has(tv.mulchType!)) typeGroups.set(tv.mulchType!, []);
+        typeGroups.get(tv.mulchType!)!.push(tv);
+    }
+
+    for (const [mulchType, vehicles] of Array.from(typeGroups.entries())) {
+        if (config.strategy === 'efficient') {
+            vehicles.sort((a, b) => {
+                const vA = state.vehicles[a.vehicleId];
+                const vB = state.vehicles[b.vehicleId];
+                const typeScore = (v: Vehicle) => v?.type === 'Truck' ? 1 : 2; // Truck first
+                return typeScore(vA) - typeScore(vB);
+            });
         }
 
         // Find stops with this mulch type that haven't been assigned yet
         const typeStops = allStops.filter(s =>
             !assigned.has(s.id) &&
-            s.mulchOrders.some(o => o.mulchType === mulchType)
+            (isSpreadingMode || s.mulchOrders.some(o => o.mulchType === mulchType))
         );
 
         if (typeStops.length === 0) {
-            summary.push(`${vehicle.name}: No stops need ${mulchType}.`);
+            summary.push(`No stops need ${isSpreadingMode ? 'spreading' : mulchType}.`);
             continue;
         }
 
-        // Calculate total bags of this type across all stops
-        const totalTypeBags = typeStops.reduce((sum, s) => {
-            return sum + s.mulchOrders
-                .filter(o => o.mulchType === mulchType)
-                .reduce((s2, o) => s2 + o.quantity, 0);
-        }, 0);
+        let remainingTypeStops = [...typeStops];
+        let vehicleIdx = 0;
+        const tripCounts = new Map<string, number>();
 
-        // Chunk into trips by vehicle capacity
-        const trips = geographicChunk(typeStops, vehicle.capacity, config.depotCoords, state.stops);
-        const tripCount = trips.length;
+        while (remainingTypeStops.length > 0) {
+            const currentVehicleAssignment = vehicles[vehicleIdx % vehicles.length];
+            const vehicle = state.vehicles[currentVehicleAssignment.vehicleId];
+            if (!vehicle) break;
 
-        summary.push(`${vehicle.name} (${mulchType}): ${typeStops.length} stops, ${totalTypeBags} bags → ${tripCount} trip(s)`);
+            const chunks = geographicChunk(remainingTypeStops, vehicle.maxBagCapacity, config.depotCoords, state.stops, isSpreadingMode);
+            if (chunks.length === 0) break;
 
-        for (let i = 0; i < trips.length; i++) {
-            const tripStops = trips[i];
+            const trip = chunks[0];
+            const tripCount = (tripCounts.get(vehicle.id) || 0) + 1;
+            tripCounts.set(vehicle.id, tripCount);
+
             const routeId = `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-            const routeName = tripCount > 1
-                ? `${vehicle.name} - ${mulchType} (Trip ${i + 1})`
-                : `${vehicle.name} - ${mulchType}`;
+            const routeName = `${vehicle.name} - ${mulchType} (Trip ${tripCount})`;
 
             const route: Route = {
                 id: routeId,
                 name: routeName,
-                vehicleId,
+                vehicleId: vehicle.id,
                 mulchType: mulchType as MulchType,
+                serviceMode: state.activeServiceMode,
                 stopIds: [],
                 color: nextColor(),
                 visible: true,
@@ -119,11 +136,16 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
             routes.push(route);
 
             // Order stops optimally within this trip
-            const ordered = optimizeTripOrder(tripStops, config.depotCoords, state.stops);
+            const ordered = optimizeTripOrder(trip, config.depotCoords, state.stops);
             for (const stopId of ordered) {
                 assignments.push({ stopId, routeId });
                 assigned.add(stopId);
             }
+
+            remainingTypeStops = remainingTypeStops.filter(s => !assigned.has(s.id));
+            vehicleIdx++;
+
+            summary.push(`Created: ${routeName} (${trip.length} stops)`);
         }
     }
 
@@ -131,24 +153,42 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
     const leftoverStops = allStops.filter(s => !assigned.has(s.id));
 
     if (leftoverStops.length > 0 && hotshotVehicles.length > 0) {
-        const { vehicleId } = hotshotVehicles[0];
-        const vehicle = state.vehicles[vehicleId];
+        if (config.strategy === 'efficient') {
+            hotshotVehicles.sort((a, b) => {
+                const vA = state.vehicles[a.vehicleId];
+                const vB = state.vehicles[b.vehicleId];
+                const typeScore = (v: Vehicle) => v?.type === 'Truck' ? 1 : 2;
+                return typeScore(vA) - typeScore(vB);
+            });
+        }
 
-        if (vehicle) {
-            const trips = geographicChunk(leftoverStops, vehicle.capacity, config.depotCoords, state.stops);
+        let remainingHotshotStops = [...leftoverStops];
+        let hotshotIdx = 0;
+        const tripCounts = new Map<string, number>();
 
-            summary.push(`${vehicle.name} (Hotshot): ${leftoverStops.length} leftover stops → ${trips.length} trip(s)`);
+        if (isSpreadingMode) {
+            // Spreading: balance bags equally across all hotshot vehicles while keeping
+            // geographically close stops together.
+            const vehicleList = hotshotVehicles
+                .map(a => state.vehicles[a.vehicleId])
+                .filter(Boolean) as Vehicle[];
 
-            for (let i = 0; i < trips.length; i++) {
-                const tripStops = trips[i];
+            const groups = spreadingBalancedSplit(remainingHotshotStops, vehicleList.length, config.depotCoords, isSpreadingMode);
+
+            for (let gi = 0; gi < groups.length; gi++) {
+                const trip = groups[gi];
+                if (trip.length === 0) continue;
+                const vehicle = vehicleList[gi % vehicleList.length];
+                const tripCount = (tripCounts.get(vehicle.id) || 0) + 1;
+                tripCounts.set(vehicle.id, tripCount);
+
                 const routeId = `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
                 const route: Route = {
                     id: routeId,
-                    name: trips.length > 1
-                        ? `${vehicle.name} - Hotshot (Trip ${i + 1})`
-                        : `${vehicle.name} - Hotshot`,
-                    vehicleId,
+                    name: `${vehicle.name} - Route ${tripCount}`,
+                    vehicleId: vehicle.id,
                     mulchType: null,
+                    serviceMode: state.activeServiceMode,
                     stopIds: [],
                     color: nextColor(),
                     visible: true,
@@ -157,17 +197,59 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
                     distanceMiles: null,
                     durationMinutes: null,
                 };
-
                 routes.push(route);
 
-                const ordered = optimizeTripOrder(tripStops, config.depotCoords, state.stops);
+                const ordered = optimizeTripOrder(trip, config.depotCoords, state.stops);
                 for (const stopId of ordered) {
                     assignments.push({ stopId, routeId });
                     assigned.add(stopId);
                 }
+
+                const totalSpreadBags = trip.reduce((s, stop) => s + (stop.spreadingOrder?.quantity || 0), 0);
+                summary.push(`Created: ${route.name} (${trip.length} stops, ${totalSpreadBags} bags to spread)`);
             }
         } else {
-            errors.push(`Hotshot vehicle not found.`);
+            while (remainingHotshotStops.length > 0) {
+                const currentAssignment = hotshotVehicles[hotshotIdx % hotshotVehicles.length];
+                const vehicle = state.vehicles[currentAssignment.vehicleId];
+                if (!vehicle) break;
+
+                const effectiveCapacity = vehicle.maxBagCapacity;
+                const chunks = geographicChunk(remainingHotshotStops, effectiveCapacity, config.depotCoords, state.stops, isSpreadingMode);
+                if (chunks.length === 0) break;
+
+                const trip = chunks[0];
+                const tripCount = (tripCounts.get(vehicle.id) || 0) + 1;
+                tripCounts.set(vehicle.id, tripCount);
+
+                const routeId = `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                const route: Route = {
+                    id: routeId,
+                    name: `${vehicle.name} - Hotshot (Trip ${tripCount})`,
+                    vehicleId: vehicle.id,
+                    mulchType: null,
+                    serviceMode: state.activeServiceMode,
+                    stopIds: [],
+                    color: nextColor(),
+                    visible: true,
+                    optimized: false,
+                    routeGeometry: null,
+                    distanceMiles: null,
+                    durationMinutes: null,
+                };
+                routes.push(route);
+
+                const ordered = optimizeTripOrder(trip, config.depotCoords, state.stops);
+                for (const stopId of ordered) {
+                    assignments.push({ stopId, routeId });
+                    assigned.add(stopId);
+                }
+
+                remainingHotshotStops = remainingHotshotStops.filter(s => !assigned.has(s.id));
+                hotshotIdx++;
+
+                summary.push(`Created: ${route.name} (${trip.length} stops)`);
+            }
         }
     } else if (leftoverStops.length > 0 && hotshotVehicles.length === 0) {
         // No hotshot vehicle — distribute leftovers to typed vehicles with capacity
@@ -191,7 +273,7 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
             const vehicle = vehicleId ? state.vehicles[vehicleId] : null;
 
             if (vehicle) {
-                const trips = geographicChunk(stops, vehicle.capacity, config.depotCoords, state.stops);
+                const trips = geographicChunk(stops, vehicle.maxBagCapacity, config.depotCoords, state.stops, isSpreadingMode);
                 for (let i = 0; i < trips.length; i++) {
                     const routeId = `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
                     const route: Route = {
@@ -199,6 +281,7 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
                         name: `${vehicle.name} - Overflow ${type} (Trip ${i + 1})`,
                         vehicleId: vehicle.id,
                         mulchType: type === 'mixed' ? null : type as MulchType,
+                        serviceMode: state.activeServiceMode,
                         stopIds: [],
                         color: nextColor(),
                         visible: true,
@@ -246,7 +329,8 @@ function geographicChunk(
     stops: DeliveryStop[],
     capacity: number,
     depotCoords: [number, number] | null,
-    allStops: Record<string, DeliveryStop>
+    allStops: Record<string, DeliveryStop>,
+    isSpreadingMode: boolean
 ): DeliveryStop[][] {
     if (stops.length === 0) return [];
 
@@ -279,7 +363,7 @@ function geographicChunk(
         // Start from the closest remaining stop to depot
         const seed = remaining[0];
         trip.push(seed);
-        tripBags += seed.totalBags;
+        tripBags += isSpreadingMode ? (seed.spreadingOrder?.quantity || 0) : seed.totalBags;
         used.add(seed.id);
 
         // Greedily add nearest neighbors that fit
@@ -288,17 +372,18 @@ function geographicChunk(
 
         for (const candidate of sortByDistanceFrom(current.coordinates!, tripRemaining)) {
             if (used.has(candidate.id)) continue;
-            if (tripBags + candidate.totalBags > capacity && trip.length > 0) {
+            const candidateBags = isSpreadingMode ? (candidate.spreadingOrder?.quantity || 0) : candidate.totalBags;
+            if (tripBags + candidateBags > capacity && trip.length > 0) {
                 // Check if this single stop exceeds capacity — if so, still add it (oversized)
                 if (trip.length === 0) {
                     trip.push(candidate);
-                    tripBags += candidate.totalBags;
+                    tripBags += candidateBags;
                     used.add(candidate.id);
                 }
                 continue;
             }
             trip.push(candidate);
-            tripBags += candidate.totalBags;
+            tripBags += candidateBags;
             used.add(candidate.id);
             current = candidate;
         }
@@ -310,16 +395,17 @@ function geographicChunk(
     // Add non-geocoded stops to the last trip or create a new one
     if (noCoords.length > 0) {
         let currentTrip = trips[trips.length - 1] || [];
-        let tripBags = currentTrip.reduce((s, stop) => s + stop.totalBags, 0);
+        let tripBags = currentTrip.reduce((s, stop) => s + (isSpreadingMode ? (stop.spreadingOrder?.quantity || 0) : stop.totalBags), 0);
 
         for (const stop of noCoords) {
-            if (tripBags + stop.totalBags > capacity && currentTrip.length > 0) {
+            const stopBags = isSpreadingMode ? (stop.spreadingOrder?.quantity || 0) : stop.totalBags;
+            if (tripBags + stopBags > capacity && currentTrip.length > 0) {
                 currentTrip = [];
                 trips.push(currentTrip);
                 tripBags = 0;
             }
             currentTrip.push(stop);
-            tripBags += stop.totalBags;
+            tripBags += stopBags;
         }
 
         if (currentTrip.length > 0 && !trips.includes(currentTrip)) {
@@ -328,6 +414,92 @@ function geographicChunk(
     }
 
     return trips;
+}
+
+/**
+ * Spreading-specific balanced split.
+ *
+ * Priority: equal bag totals per vehicle, with geographic cohesion as a tiebreaker.
+ *
+ * Algorithm:
+ * 1. Sort all stops by distance from depot → creates a spatial ordering.
+ * 2. Assign each stop to whichever bucket currently has the fewest bags
+ *    (min-heap / linear scan). Ties broken by closest geographic centroid of
+ *    the candidate bucket.
+ * 3. Non-geocoded stops appended last to the least-loaded bucket.
+ */
+function spreadingBalancedSplit(
+    stops: DeliveryStop[],
+    numBuckets: number,
+    depotCoords: [number, number] | null,
+    isSpreadingMode: boolean
+): DeliveryStop[][] {
+    if (numBuckets <= 0 || stops.length === 0) return [stops];
+
+    const withCoords = stops.filter(s => s.coordinates);
+    const noCoords = stops.filter(s => !s.coordinates);
+
+    // 1. Sort geographically by distance from depot
+    const ref: [number, number] = depotCoords || (withCoords.length > 0
+        ? [
+            withCoords.reduce((s, stop) => s + stop.coordinates![0], 0) / withCoords.length,
+            withCoords.reduce((s, stop) => s + stop.coordinates![1], 0) / withCoords.length,
+        ]
+        : [0, 0]);
+    const sorted = [...withCoords].sort((a, b) => dist(ref, a.coordinates!) - dist(ref, b.coordinates!));
+
+    // 2. Initialize buckets
+    const buckets: DeliveryStop[][] = Array.from({ length: numBuckets }, () => []);
+    const bucketBags: number[] = new Array(numBuckets).fill(0);
+
+    const getBags = (s: DeliveryStop) => isSpreadingMode ? (s.spreadingOrder?.quantity || 0) : s.totalBags;
+
+    // Compute centroid of a bucket (or ref if empty)
+    const centroid = (bucket: DeliveryStop[]): [number, number] => {
+        const withC = bucket.filter(s => s.coordinates);
+        if (withC.length === 0) return ref;
+        return [
+            withC.reduce((sum, s) => sum + s.coordinates![0], 0) / withC.length,
+            withC.reduce((sum, s) => sum + s.coordinates![1], 0) / withC.length,
+        ];
+    };
+
+    for (const stop of sorted) {
+        const bags = getBags(stop);
+        const stopCoord = stop.coordinates!;
+
+        // Find bucket with minimum bags; use geographic closeness as tiebreaker
+        let bestIdx = 0;
+        let bestBags = bucketBags[0];
+        let bestDistToCentroid = dist(stopCoord, centroid(buckets[0]));
+
+        for (let i = 1; i < numBuckets; i++) {
+            const bBags = bucketBags[i];
+            const bDist = dist(stopCoord, centroid(buckets[i]));
+
+            // Primary: fewer bags wins. Within a 15% tolerance, prefer the closer centroid.
+            const tolerance = (bestBags + bBags) * 0.15;
+            const bagDiff = bBags - bestBags;
+            if (bagDiff < -tolerance || (Math.abs(bagDiff) <= tolerance && bDist < bestDistToCentroid)) {
+                bestIdx = i;
+                bestBags = bBags;
+                bestDistToCentroid = bDist;
+            }
+        }
+
+        buckets[bestIdx].push(stop);
+        bucketBags[bestIdx] += bags;
+    }
+
+    // 3. Append non-geocoded stops to the buckets with the fewest bags
+    for (const stop of noCoords) {
+        const bags = getBags(stop);
+        const minIdx = bucketBags.indexOf(Math.min(...bucketBags));
+        buckets[minIdx].push(stop);
+        bucketBags[minIdx] += bags;
+    }
+
+    return buckets.filter(b => b.length > 0);
 }
 
 /** Sort stops by distance from a point */
