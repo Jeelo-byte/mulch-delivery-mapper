@@ -623,17 +623,19 @@ export function RouteEditor() {
             {/* Auto-gen panel */}
             {showAutoGen && (
                 <div className="auto-gen-panel">
-                    <h4 className="auto-gen-title">🚛 Smart Route Generator</h4>
-                    <p className="auto-gen-desc">Assign a mulch type to each vehicle. Leave blank for hotshot (any type).</p>
+                    <h4 className="auto-gen-title">🚛 Smart Route Generator — Sweep &amp; Pack</h4>
+                    <p className="auto-gen-desc">
+                        Assign a mulch type to each dedicated truck. Vehicles left blank act as <strong>Hotshot/Trailer</strong> and receive mixed orders, outliers, and runt trips automatically.
+                    </p>
                     <div className="form-field" style={{ marginBottom: 12 }}>
                         <label className="form-label">🧠 Strategy</label>
                         <select value={autoGenStrategy} onChange={(e) => setAutoGenStrategy(e.target.value as 'standard' | 'efficient')} className="input input-sm">
-                            <option value="efficient">Distance-Based (Trucks near, Trailers far)</option>
-                            <option value="standard">Standard Clustering</option>
+                            <option value="efficient">Efficient — largest vehicle fills first</option>
+                            <option value="standard">Standard — first vehicle in list fills first</option>
                         </select>
                     </div>
                     <div className="form-field" style={{ marginBottom: 12 }}>
-                        <label className="form-label">🛻 Vehicle Assignments</label>
+                        <label className="form-label">🛻 Vehicle Assignments <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-tertiary)' }}>(typed trucks → SweepPack, blank → Hotshot pool)</span></label>
                         {vehicles.length === 0 && <p className="empty-state-sm">Add vehicles first.</p>}
                         {vehicleAssignments.map((a, i) => {
                             const v = state.vehicles[a.vehicleId];

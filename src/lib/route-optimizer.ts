@@ -1,4 +1,4 @@
-import type { DeliveryStop, OptimizationMode } from './types';
+import type { DeliveryStop, OptimizationMode, AppSettings } from './types';
 import { featureCollection, point, clustersKmeans, centerOfMass } from '@turf/turf';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
@@ -238,4 +238,148 @@ export async function getRouteDirections(
     } catch {
         return null;
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TIME-AWARE NEAREST NEIGHBOR FOR SPREADING CREWS
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parse an "HH:MM" or "H:MM AM/PM" time string into minutes since midnight.
+ */
+function parseTimeToMinutes(timeStr: string): number {
+    const trimmed = timeStr.trim();
+
+    // Try 12-hour format first: "8:00 AM", "12:30 PM"
+    const amPmMatch = trimmed.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (amPmMatch) {
+        let hours = parseInt(amPmMatch[1], 10);
+        const minutes = parseInt(amPmMatch[2], 10);
+        const period = amPmMatch[3].toUpperCase();
+        if (period === 'AM' && hours === 12) hours = 0;
+        if (period === 'PM' && hours !== 12) hours += 12;
+        return hours * 60 + minutes;
+    }
+
+    // 24-hour format: "08:00", "13:30"
+    const parts = trimmed.split(':');
+    if (parts.length >= 2) {
+        return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+    }
+
+    // Fallback: 8 AM = 480 minutes
+    return 480;
+}
+
+/**
+ * Haversine distance in km (local copy to avoid circular dep issues).
+ */
+function haversineKm(a: [number, number], b: [number, number]): number {
+    const R = 6371;
+    const dLat = ((b[1] - a[1]) * Math.PI) / 180;
+    const dLng = ((b[0] - a[0]) * Math.PI) / 180;
+    const lat1 = (a[1] * Math.PI) / 180;
+    const lat2 = (b[1] * Math.PI) / 180;
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+/** Average speed for spreading crew drive-time estimation (km/h) */
+const SPREADING_AVG_SPEED_KMH = 40;
+
+/**
+ * Time-Aware Nearest Neighbor for spreading crew sequencing.
+ *
+ * The spreading crew departs later than delivery trucks and must not arrive
+ * at a house before the delivery truck has dropped off the mulch.
+ *
+ * @param spreadingStops - Stops that this spreading route must visit
+ * @param deliveryETAs   - Map of stopId → arrival time (minutes since midnight)
+ *                         representing when the delivery truck will arrive
+ * @param settings       - AppSettings (needs spreadingStartTime, depotCoords,
+ *                         laborTimePerSpreadBag)
+ * @returns Ordered array of stop IDs
+ */
+export function sequenceSpreadingRoute(
+    spreadingStops: DeliveryStop[],
+    deliveryETAs: Record<string, number>,
+    settings: AppSettings,
+): string[] {
+    if (spreadingStops.length === 0) return [];
+
+    const orderedIds: string[] = [];
+    const remaining = [...spreadingStops];
+
+    // Current time starts at the spreading crew's departure time
+    let currentTime = parseTimeToMinutes(settings.spreadingStartTime || '9:00 AM');
+
+    // Current location starts at the depot
+    let currentLoc: [number, number] | null = settings.depotCoords || null;
+
+    while (remaining.length > 0) {
+        // ── Find "ready" stops: delivery has already arrived ──
+        const readyStops = remaining.filter(s => {
+            const eta = deliveryETAs[s.id];
+            return eta !== undefined && eta <= currentTime;
+        });
+
+        let selected: DeliveryStop;
+
+        if (readyStops.length > 0) {
+            // ── Normal Flow: pick the geographically closest ready stop ──
+            if (currentLoc) {
+                selected = readyStops.reduce((best, s) => {
+                    if (!s.coordinates) return best;
+                    if (!best.coordinates) return s;
+                    const dBest = haversineKm(currentLoc!, best.coordinates);
+                    const dS = haversineKm(currentLoc!, s.coordinates);
+                    return dS < dBest ? s : best;
+                }, readyStops[0]);
+            } else {
+                selected = readyStops[0];
+            }
+        } else {
+            // ── Catch-up Flow: no stops ready yet → fast-forward to earliest ETA ──
+            let earliest: DeliveryStop = remaining[0];
+            let earliestETA = deliveryETAs[earliest.id] ?? Infinity;
+
+            for (const s of remaining) {
+                const eta = deliveryETAs[s.id] ?? Infinity;
+                if (eta < earliestETA) {
+                    earliest = s;
+                    earliestETA = eta;
+                }
+            }
+
+            // Fast-forward the clock
+            if (earliestETA > currentTime) {
+                currentTime = earliestETA;
+            }
+            selected = earliest;
+        }
+
+        orderedIds.push(selected.id);
+
+        // ── Advance the clock ──
+        // Drive time from current location to selected stop
+        if (currentLoc && selected.coordinates) {
+            const driveDistKm = haversineKm(currentLoc, selected.coordinates);
+            const driveTimeMinutes = (driveDistKm / SPREADING_AVG_SPEED_KMH) * 60;
+            currentTime += driveTimeMinutes;
+        }
+
+        // Labor time at this stop
+        const spreadBags = selected.spreadingOrder?.quantity || 0;
+        const laborTime = spreadBags * (settings.laborTimePerSpreadBag || 0);
+        currentTime += laborTime;
+
+        // Update current location & remove from remaining
+        if (selected.coordinates) {
+            currentLoc = selected.coordinates;
+        }
+        const idx = remaining.findIndex(s => s.id === selected.id);
+        if (idx !== -1) remaining.splice(idx, 1);
+    }
+
+    return orderedIds;
 }
