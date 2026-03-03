@@ -296,7 +296,11 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         const depotCoords = state.settings.depotCoords;
 
         const handleStyleLoad = () => {
-            if (!map.isStyleLoaded()) return;
+            try {
+                if (!map.getStyle()) return;
+            } catch (e) {
+                return;
+            }
 
             for (const sourceId of routeSourcesRef.current) {
                 if (map.getLayer(`${sourceId}-layer`)) map.removeLayer(`${sourceId}-layer`);
@@ -401,8 +405,14 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         };
 
         if (map.isStyleLoaded()) handleStyleLoad();
+
+        // Ensure we listen to both style.load and load events
         map.on('style.load', handleStyleLoad);
-        return () => { map.off('style.load', handleStyleLoad); };
+        map.on('load', handleStyleLoad);
+        return () => {
+            map.off('style.load', handleStyleLoad);
+            map.off('load', handleStyleLoad);
+        };
     }, [visibleRoutes, state.stops, state.settings, state.selectedRouteId, resolvedTheme]);
 
     // Fit bounds

@@ -186,7 +186,10 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                             <div className="csv-dropzone-actions" style={{ display: 'flex', gap: '2rem', justifyContent: 'center' }}>
                                 <div
                                     className="upload-option"
-                                    onClick={() => fileInputRef.current?.click()}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        fileInputRef.current?.click();
+                                    }}
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', padding: '1rem', borderRadius: '0.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
                                 >
                                     <Upload size={40} className="csv-dropzone-icon" />
@@ -197,7 +200,10 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                                 </div>
                                 <div
                                     className="upload-option"
-                                    onClick={() => jsonInputRef.current?.click()}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        jsonInputRef.current?.click();
+                                    }}
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', padding: '1rem', borderRadius: '0.5rem', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}
                                 >
                                     <Upload size={40} className="csv-dropzone-icon" />
@@ -210,7 +216,7 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                             <input
                                 ref={fileInputRef}
                                 type="file"
-                                accept=".csv"
+                                accept=".csv,.json,application/json"
                                 onChange={handleFileSelect}
                                 className="sr-only"
                             />
