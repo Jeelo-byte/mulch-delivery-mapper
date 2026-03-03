@@ -154,14 +154,24 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
         for (const trip of sweepTrips) {
             const vehicleAssignment = vehiclesForType[vehicleIdx % vehiclesForType.length];
             const vehicle = state.vehicles[vehicleAssignment.vehicleId];
-            if (!vehicle) continue;
+            if (!vehicle) { vehicleIdx++; continue; }
 
             const tripBags = trip.reduce((s, stop) => s + stop.totalBags, 0);
+
+            // ── Hard capacity enforcement ──
+            // sweepAndPack already respects per-vehicle limits, but guard here too
+            if (tripBags > vehicle.maxBagCapacity) {
+                errors.push(`Warning: ${vehicle.name} Trip ${(tripCounts.get(vehicle.id) || 0) + 1} has ${tripBags} bags — exceeds capacity of ${vehicle.maxBagCapacity}. Sending to trailer pool.`);
+                trailerPool.push(...trip);
+                // Do NOT advance vehicleIdx — keep this vehicle slot available
+                continue;
+            }
 
             // ── Runt Check ──
             if (tripBags < vehicle.maxBagCapacity * RUNT_THRESHOLD && trip.length > 0) {
                 trailerPool.push(...trip);
                 summary.push(`Runt dissolved: ${trip.length} stop(s) (${tripBags} bags, ${Math.round((tripBags / vehicle.maxBagCapacity) * 100)}% of ${vehicle.name}) → trailer pool.`);
+                // Do NOT advance vehicleIdx so the vehicle slot is reused for the next real trip
                 continue;
             }
 
@@ -195,8 +205,8 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
                 assigned.add(stopId);
             }
 
-            summary.push(`Created: ${routeName} (${trip.length} stops, ${tripBags} bags)`);
-            vehicleIdx++;
+            summary.push(`Created: ${routeName} (${trip.length} stops, ${tripBags}/${vehicle.maxBagCapacity} bags)`);
+            vehicleIdx++; // Only advance when a trip is actually finalized
         }
     }
 
@@ -314,11 +324,12 @@ export function smartAutoGenerate(state: AppState, config: SmartAutoConfig): Aut
  *
  * 1. Compute polar angle of each stop relative to depot
  * 2. Sort by angle (circular sweep)
- * 3. Greedily pack stops into trips up to each vehicle's maxBagCapacity
- * 4. Trip-merge pass: consolidate small adjacent trips to reduce fragmentation
+ * 3. Greedy capacity packing cycling through each vehicle's EXACT maxBagCapacity
+ *    so that trip[i] is guaranteed to fit in vehicles[i % vehicles.length].
+ * 4. Trip-merge pass using minCap (safe for any vehicle assignment)
+ * 5. Non-geocoded stops placed into the lightest trip with remaining room
  *
- * Returns an array of stop-groups (trips). The caller assigns each trip to a
- * vehicle and performs the runt check.
+ * Returns trips in angular order. Caller assigns trip[i] → vehicles[i % len].
  */
 function sweepAndPack(
     stops: DeliveryStop[],
@@ -349,65 +360,76 @@ function sweepAndPack(
     // Sort by polar angle (ascending) — creates the circular sweep
     withAngles.sort((a, b) => a.angle - b.angle);
 
-    // Representative vehicle capacity (use largest for initial packing)
-    const maxCap = vehicles.reduce((best, v) => Math.max(best, v.maxBagCapacity ?? 0), 0) || Infinity;
+    // Helper: capacity for the Nth trip created (round-robin through vehicles)
+    const capForTrip = (tripIdx: number): number =>
+        vehicles[tripIdx % vehicles.length]?.maxBagCapacity ?? Infinity;
 
-    // ── Pass 1: Greedy capacity packing ─────────────────────────────────────
+    // Smallest vehicle capacity — used as a safe cap for the merge pass.
+    // Any merged trip that fits inside minCap is guaranteed to fit in every
+    // possible vehicle assignment.
+    const minCap = vehicles.reduce((best, v) => Math.min(best, v.maxBagCapacity ?? Infinity), Infinity);
+
+    // ── Pass 1: Per-vehicle greedy capacity packing ───────────────────────
+    // Each trip is filled to exactly its assigned vehicle's maxBagCapacity,
+    // enforcing the hard limit from the start.
     const rawTrips: DeliveryStop[][] = [];
     let currentTrip: DeliveryStop[] = [];
     let currentBags = 0;
 
     for (const { stop } of withAngles) {
         const stopBags = stop.totalBags;
-        if (currentTrip.length > 0 && currentBags + stopBags > maxCap) {
+        const thisTripCap = capForTrip(rawTrips.length); // current in-progress trip index
+
+        if (currentTrip.length > 0 && currentBags + stopBags > thisTripCap) {
+            // Hard limit reached — seal the current trip and start the next one
             rawTrips.push(currentTrip);
             currentTrip = [];
             currentBags = 0;
         }
+
+        // Safety: if a single stop alone exceeds capacity, it still goes on its
+        // own trip (we can't split a stop any further).
         currentTrip.push(stop);
         currentBags += stopBags;
     }
     if (currentTrip.length > 0) rawTrips.push(currentTrip);
 
-    // ── Pass 2: Trip-merge — consolidate small adjacent trips ────────────────
-    // Iterate through adjacent trip pairs (in angular order). If two neighbours
-    // fit within one vehicle's capacity, merge them. Repeat until stable.
+    // ── Pass 2: Trip-merge — consolidate small adjacent trips ─────────────
+    // We use minCap here so a merged trip is guaranteed safe for any vehicle
+    // in the pool that may receive it. Repeat until no more merges are possible.
     let merged = true;
     while (merged) {
         merged = false;
         for (let i = 0; i < rawTrips.length - 1; i++) {
-            const a = rawTrips[i];
-            const b = rawTrips[i + 1];
-            const bagA = a.reduce((s, st) => s + st.totalBags, 0);
-            const bagB = b.reduce((s, st) => s + st.totalBags, 0);
-            if (bagA + bagB <= maxCap) {
-                // Merge b into a
-                rawTrips[i] = [...a, ...b];
+            const bagA = rawTrips[i].reduce((s, st) => s + st.totalBags, 0);
+            const bagB = rawTrips[i + 1].reduce((s, st) => s + st.totalBags, 0);
+            if (bagA + bagB <= minCap) {
+                rawTrips[i] = [...rawTrips[i], ...rawTrips[i + 1]];
                 rawTrips.splice(i + 1, 1);
                 merged = true;
-                break; // restart scan after any merge
+                break;
             }
         }
     }
 
     const trips = rawTrips;
 
-    // ── Append non-geocoded stops to the lightest existing trip ──────────────
+    // ── Non-geocoded stops: place into lightest trip with room ────────────
+    // Use the vehicle capacity of each trip slot for the hard-limit check.
     if (noCoords.length > 0) {
         for (const stop of noCoords) {
             const stopBags = stop.totalBags;
-            // Find the trip with fewest bags that still has room
             let bestTripIdx = -1;
             let bestBags = Infinity;
             for (let i = 0; i < trips.length; i++) {
                 const tb = trips[i].reduce((s, st) => s + st.totalBags, 0);
-                if (tb + stopBags <= maxCap && tb < bestBags) {
+                const cap = capForTrip(i);
+                if (tb + stopBags <= cap && tb < bestBags) {
                     bestBags = tb;
                     bestTripIdx = i;
                 }
             }
             if (bestTripIdx === -1) {
-                // No trip has room — start a new one
                 trips.push([stop]);
             } else {
                 trips[bestTripIdx].push(stop);
