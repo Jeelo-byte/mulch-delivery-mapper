@@ -10,6 +10,44 @@ export interface StopETA {
     timeAtStop: number;
     /** Total elapsed minutes from route start when arriving at this stop */
     cumulativeMins: number;
+    /**
+     * Absolute minutes from the delivery date's 00:00.
+     * Use this for cross-route dependency comparisons that may span different dates.
+     */
+    absoluteMins: number;
+}
+
+/**
+ * Returns the number of minutes difference between two ISO date strings (YYYY-MM-DD).
+ * Positive = dateB is after dateA.
+ */
+function dateDiffMins(dateA: string, dateB: string): number {
+    const a = new Date(dateA + 'T00:00:00').getTime();
+    const b = new Date(dateB + 'T00:00:00').getTime();
+    return (b - a) / 60000;
+}
+
+/**
+ * Get the absolute start time in minutes from the delivery date 00:00 for a given route.
+ * Spreading routes may start on a different date (spreadingDate) so their absolute
+ * start time factors in the date offset relative to deliveryDate.
+ */
+export function getRouteAbsoluteStartMins(route: Route, state: AppState): number {
+    const settings = state.settings;
+    const isSpreadingRoute = route.serviceMode === 'spreading';
+
+    const rawTime = isSpreadingRoute
+        ? (settings.spreadingStartTime || '09:00')
+        : (settings.deliveryStartTime || '08:00');
+    const timeMins = rawTime.split(':').reduce((h: number, m: string) => h * 60 + Number(m), 0);
+
+    const deliveryDate = settings.deliveryDate || new Date().toISOString().split('T')[0];
+    const routeDate = isSpreadingRoute
+        ? (settings.spreadingDate || deliveryDate)
+        : deliveryDate;
+
+    const dateOffset = dateDiffMins(deliveryDate, routeDate);
+    return dateOffset + timeMins;
 }
 
 /**
@@ -25,14 +63,17 @@ export function computeRouteETAs(route: Route, state: AppState): StopETA[] {
         ? (settings.spreadingStartTime || '09:00')
         : (settings.deliveryStartTime || '08:00');
 
-    const startMins = rawStart.split(':').reduce((h, m) => h * 60 + Number(m), 0);
+    const startMins = rawStart.split(':').reduce((h: number, m: string) => h * 60 + Number(m), 0);
     const lunchStartMins = (settings.lunchBreakStartTime || '12:00')
-        .split(':').reduce((h, m) => h * 60 + Number(m), 0);
+        .split(':').reduce((h: number, m: string) => h * 60 + Number(m), 0);
     const lunchDuration = settings.lunchBreakDuration ?? 30;
     const laborPerSpreadBag = settings.laborTimePerSpreadBag ?? 3;
     const laborPerDeliveryBag = settings.timeSpentPerDeliveryBag ?? 2;
 
     const legOffset = settings.depotCoords ? 1 : 0;
+
+    // Absolute start = minutes from deliveryDate 00:00 (accounts for date offsets)
+    const absoluteStart = getRouteAbsoluteStartMins(route, state);
 
     let currentMins = startMins;
     let hasTakenLunch = false;
@@ -61,6 +102,8 @@ export function computeRouteETAs(route: Route, state: AppState): StopETA[] {
         }
 
         const arrivalMins = currentMins;
+        // absoluteMins = minutes since deliveryDate 00:00 (cross-day comparable)
+        const absoluteMins = absoluteStart + (arrivalMins - startMins);
 
         // Compute time at this stop (labor)
         let timeAtStop = 0;
@@ -76,6 +119,7 @@ export function computeRouteETAs(route: Route, state: AppState): StopETA[] {
             etaStr: formatMinutes(arrivalMins),
             timeAtStop,
             cumulativeMins: arrivalMins,
+            absoluteMins,
         });
 
         // Advance clock by labor time so next stop's drive time starts after departure

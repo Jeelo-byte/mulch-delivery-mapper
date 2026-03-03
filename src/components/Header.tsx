@@ -1,8 +1,9 @@
 'use client';
 
 import { useTheme } from 'next-themes';
-import { Sun, Moon, Upload, TreePine, Settings, Download, UploadCloud, Share2 } from 'lucide-react';
+import { Sun, Moon, Upload, TreePine, Settings, Download, UploadCloud, Share2, BarChart2 } from 'lucide-react';
 import { useAppState, useAppDispatch } from '@/src/lib/store';
+import { exportSummaryReport } from '@/src/lib/report-export';
 import { useEffect, useState, useRef } from 'react';
 import LZString from 'lz-string';
 
@@ -141,6 +142,9 @@ export function Header({ onUploadClick, onSettingsClick }: HeaderProps) {
                     <>
                         <button onClick={handleShareLink} className="btn btn-ghost" title="Share Route Plan" disabled={isSharing}>
                             {isSharing ? <span className="spinner" style={{ display: 'inline-block', width: 18, height: 18, border: '2px solid var(--text-muted)', borderTopColor: 'var(--text-primary)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} /> : <Share2 size={18} />}
+                        </button>
+                        <button onClick={() => exportSummaryReport(state)} className="btn btn-ghost" title="Operations Summary Report">
+                            <BarChart2 size={18} />
                         </button>
                         <button onClick={handleExportJSON} className="btn btn-ghost" title="Export JSON">
                             <Download size={18} />

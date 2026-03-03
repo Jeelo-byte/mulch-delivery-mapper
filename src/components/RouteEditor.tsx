@@ -179,7 +179,8 @@ export function RouteEditor() {
 
     // ── Delivery-first dependency warning ───────────────────────────────────────
     // Find stops that appear in both a delivery route and spreading route, and
-    // where the spreading ETA is BEFORE the delivery ETA.
+    // where the spreading ETA absolute time is BEFORE the delivery ETA absolute time.
+    // Uses absoluteMins which accounts for different calendar dates (deliveryDate vs spreadingDate).
     const dependencyWarnings = useMemo(() => {
         if (state.activeServiceMode !== 'spreading') return [];
         const warnings: string[] = [];
@@ -187,11 +188,11 @@ export function RouteEditor() {
         const spreadingRoutes = Object.values(state.routes).filter(r => r.serviceMode === 'spreading');
         const deliveryRoutes = Object.values(state.routes).filter(r => r.serviceMode === 'mulch');
 
-        // Build delivery ETAs: stopId → arrival minutes
-        const deliveryETA = new Map<string, number>();
+        // Build delivery ETAs: stopId → absolute minutes from deliveryDate 00:00
+        const deliveryAbsoluteETA = new Map<string, number>();
         for (const dRoute of deliveryRoutes) {
             for (const eta of computeRouteETAs(dRoute, state)) {
-                deliveryETA.set(eta.stopId, eta.cumulativeMins);
+                deliveryAbsoluteETA.set(eta.stopId, eta.absoluteMins);
             }
         }
 
@@ -200,8 +201,8 @@ export function RouteEditor() {
             const sVehicleName = sVehicle?.name || 'Unknown Vehicle';
             const spreadingETAs = computeRouteETAs(sRoute, state);
             for (const eta of spreadingETAs) {
-                const deliveryMins = deliveryETA.get(eta.stopId);
-                if (deliveryMins !== undefined && eta.cumulativeMins < deliveryMins) {
+                const deliveryAbsMins = deliveryAbsoluteETA.get(eta.stopId);
+                if (deliveryAbsMins !== undefined && eta.absoluteMins < deliveryAbsMins) {
                     const stop = state.stops[eta.stopId];
                     const stopNum = eta.index + 1;
                     warnings.push(
@@ -278,14 +279,14 @@ export function RouteEditor() {
         setOptimizing(routeId);
 
         const stops = route.stopIds.map(id => state.stops[id]).filter(s => s?.coordinates);
-        const result = await optimizeRoute(stops, mode);
+        const result = await optimizeRoute(stops, mode, state.settings.depotCoords);
         dispatch({ type: 'REORDER_ROUTE_STOPS', payload: { routeId, stopIds: result.orderedIds } });
 
         if (result.geometry) {
             dispatch({ type: 'SET_ROUTE_GEOMETRY', payload: { routeId, geometry: result.geometry } });
         } else {
             const orderedStops = result.orderedIds.map(id => state.stops[id]).filter(Boolean);
-            const geometry = await getRouteDirections(orderedStops);
+            const geometry = await getRouteDirections(orderedStops, state.settings.depotCoords);
             if (geometry) dispatch({ type: 'SET_ROUTE_GEOMETRY', payload: { routeId, geometry } });
         }
 

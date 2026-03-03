@@ -231,19 +231,20 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         }
     }, [visibleStops, createMarkerEl, dispatch, state.selectedRouteId, onStopClick, onStopDetail]);
 
-    // Overlay labels
+    // Overlay labels — only for Scout and Notes (bag count is shown inside the pin bubble)
     useEffect(() => {
         const map = mapRef.current;
         if (!map) return;
         for (const [, marker] of overlayMarkersRef.current) marker.remove();
         overlayMarkersRef.current.clear();
 
-        if (!state.overlays.showScoutName && !state.overlays.showBagCount && !state.overlays.showSpecialInstructions) return;
+        // Only create text labels for Scout and Notes overlays (not for bag count)
+        if (!state.overlays.showScoutName && !state.overlays.showSpecialInstructions) return;
 
         for (const stop of visibleStops) {
             if (!stop.coordinates) continue;
             const parts: string[] = [];
-            if (state.overlays.showBagCount) parts.push(`${stop.totalBags} bags`);
+            // Bag count is intentionally excluded here — it shows inside the pin bubble
             if (state.overlays.showScoutName) parts.push(stop.mulchOrders[0]?.scoutName || 'Unknown');
             if (state.overlays.showSpecialInstructions && stop.fulfillmentNotes) {
                 parts.push(stop.fulfillmentNotes.length > 40 ? stop.fulfillmentNotes.substring(0, 40) + '...' : stop.fulfillmentNotes);

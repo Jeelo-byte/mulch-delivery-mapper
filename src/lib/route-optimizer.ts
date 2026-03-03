@@ -143,7 +143,7 @@ async function callOptimizationApi(
 
         const coordinates = coordsArr.join(';');
 
-        const url = `https://api.mapbox.com/optimized-trips/v1/${profile}/${coordinates}?access_token=${MAPBOX_TOKEN}&geometries=geojson&overview=full&roundtrip=false&source=first`;
+        const url = `https://api.mapbox.com/optimized-trips/v1/${profile}/${coordinates}?access_token=${MAPBOX_TOKEN}&geometries=geojson&overview=full&roundtrip=false&source=first&destination=last`;
 
         const response = await fetch(url);
         if (!response.ok) {
@@ -154,21 +154,31 @@ async function callOptimizationApi(
         const data = await response.json();
         if (data.trips && data.trips.length > 0) {
             const trip = data.trips[0];
+            // Each waypoint has:
+            //   waypoint_index: the original input index (0 = depot if depotCoords present)
+            //   trips_index: which trip it belongs to (always 0 for single-trip)
+            //   The position in the optimized trip order is determined by sorting by waypoint_index
+            //   within waypoints that belong to trips_index 0.
             const waypoints = data.waypoints as Array<{ waypoint_index: number; trips_index: number }>;
 
+            // Sort waypoints by their position in the optimized trip (waypoint_index = optimized order)
             const reordered: string[] = [];
-            const sortedWaypoints = [...waypoints].sort((a, b) => a.trips_index - b.trips_index);
+            const tripWaypoints = waypoints
+                .map((wp, inputIdx) => ({ ...wp, inputIdx }))
+                .filter(wp => wp.trips_index === 0)
+                .sort((a, b) => a.waypoint_index - b.waypoint_index);
 
-            for (const wp of sortedWaypoints) {
-                if (depotCoords && wp.waypoint_index === 0) continue;
-                const originalStopIdx = depotCoords ? wp.waypoint_index - 1 : wp.waypoint_index;
+            for (const wp of tripWaypoints) {
+                // Skip the depot entry (inputIdx 0 when depotCoords present)
+                if (depotCoords && wp.inputIdx === 0) continue;
+                const originalStopIdx = depotCoords ? wp.inputIdx - 1 : wp.inputIdx;
                 if (originalStopIdx >= 0 && originalStopIdx < stops.length) {
                     reordered.push(stops[originalStopIdx].id);
                 }
             }
 
             return {
-                orderedIds: reordered,
+                orderedIds: reordered.length > 0 ? reordered : stops.map(s => s.id),
                 geometry: trip.geometry as GeoJSON.LineString,
             };
         }
