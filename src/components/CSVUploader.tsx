@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { parseCSV, aggregateStops } from '@/src/lib/csv-parser';
 import { batchGeocode } from '@/src/lib/geocoder';
 import { detectHotshots } from '@/src/lib/hotshot-detector';
-import { useAppDispatch } from '@/src/lib/store';
+import { useAppDispatch, useAppState } from '@/src/lib/store';
 
 interface CSVUploaderProps {
     onComplete: () => void;
@@ -14,6 +14,7 @@ interface CSVUploaderProps {
 
 export function CSVUploader({ onComplete }: CSVUploaderProps) {
     const dispatch = useAppDispatch();
+    const state = useAppState();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const jsonInputRef = useRef<HTMLInputElement>(null);
     const [isDragging, setIsDragging] = useState(false);
@@ -54,7 +55,7 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
 
                 setProgress({ stage: 'Aggregating orders...', percent: 25 });
                 await new Promise((r) => setTimeout(r, 100));
-                const { stops, stopOrder } = aggregateStops(lineItems);
+                const { stops, stopOrder } = aggregateStops(lineItems, state.settings.mulchTypes);
 
                 dispatch({ type: 'LOAD_CSV', payload: { raw, lineItems, stops, stopOrder } });
 
@@ -92,7 +93,7 @@ export function CSVUploader({ onComplete }: CSVUploaderProps) {
                 setIsProcessing(false);
             }
         },
-        [dispatch, onComplete, processJsonFile]
+        [dispatch, onComplete, processJsonFile, state.settings.mulchTypes]
     );
 
     const handleDrop = useCallback(

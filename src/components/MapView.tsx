@@ -5,15 +5,11 @@ import mapboxgl from 'mapbox-gl';
 import { useTheme } from 'next-themes';
 import { useAppState, useAppDispatch } from '@/src/lib/store';
 import type { DeliveryStop, MulchType } from '@/src/lib/types';
+import { getMulchColor } from '@/src/lib/color-utils';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
 mapboxgl.accessToken = MAPBOX_TOKEN;
 
-const MULCH_COLORS: Record<string, string> = {
-    black: '#1f2937',
-    'aromatic cedar': '#d97706',
-    'fine shredded hardwood': '#92400e',
-};
 
 const LIGHT_STYLE = 'mapbox://styles/mapbox/light-v11';
 const DARK_STYLE = 'mapbox://styles/mapbox/dark-v11';
@@ -119,7 +115,7 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
             const primaryMulch = stop.mulchOrders[0];
             let color = '#6b7280';
             if (primaryMulch) {
-                color = MULCH_COLORS[primaryMulch.mulchType.toLowerCase()] || '#6b7280';
+                color = getMulchColor(primaryMulch.mulchType);
             } else if (stop.spreadingOrder) {
                 color = '#6366f1';
             }
@@ -134,14 +130,14 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
             const badgeContent = routeIndex !== null ? routeIndex : stop.totalBags;
 
             el.innerHTML = `
-        <div class="marker-pin" style="background-color: ${markerColor}; opacity: ${opacity}; ${isDimmed ? 'transform: scale(0.85);' : ''}">
+        <div class="marker-pin" style="background-color: ${markerColor}; opacity: ${opacity}; --pin-scale: ${(state.settings.mapPinScale || 1.0) * (isDimmed ? 0.85 : 1)};">
           <span class="marker-count">${badgeContent}</span>
         </div>
         ${stop.isHotshot && !isDisabled ? '<div class="marker-hotshot">🔥</div>' : ''}
       `;
             return el;
         },
-        [state.routes]
+        [state.routes, state.activeServiceMode, state.settings.mapPinScale]
     );
 
     // Update markers
@@ -229,7 +225,7 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 .addTo(map);
             markersRef.current.set(stop.id, marker);
         }
-    }, [visibleStops, createMarkerEl, dispatch, state.selectedRouteId, onStopClick, onStopDetail]);
+    }, [visibleStops, createMarkerEl, dispatch, state.selectedRouteId, onStopClick, onStopDetail, state.routes, state.activeServiceMode, state.settings.mapPinScale]);
 
     // Overlay labels — only for Scout and Notes (bag count is shown inside the pin bubble)
     useEffect(() => {
@@ -295,11 +291,13 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
     // Update route lines
     useEffect(() => {
         const map = mapRef.current;
-        if (!map || !map.isStyleLoaded()) return;
+        if (!map) return;
 
         const depotCoords = state.settings.depotCoords;
 
         const handleStyleLoad = () => {
+            if (!map.isStyleLoaded()) return;
+
             for (const sourceId of routeSourcesRef.current) {
                 if (map.getLayer(`${sourceId}-layer`)) map.removeLayer(`${sourceId}-layer`);
                 if (map.getSource(sourceId)) map.removeSource(sourceId);
@@ -310,7 +308,9 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 const isSelected = state.selectedRouteId === route.id;
                 const isDimmed = state.selectedRouteId !== null && !isSelected;
                 const opacity = isDimmed ? 0.2 : 0.8;
-                const width = isSelected ? 6 : 4;
+                const baseWidth = state.settings.mapLineThickness || 4;
+                const selectedWidth = state.settings.mapSelectedLineThickness || 6;
+                const width = isSelected ? selectedWidth : baseWidth;
 
                 if (route.routeGeometry) {
                     const sourceId = `route-${route.id}`;
@@ -326,6 +326,50 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                         paint: { 'line-color': route.color, 'line-width': width, 'line-opacity': opacity },
                     });
                     routeSourcesRef.current.add(sourceId);
+
+                    if (route.legStats && route.legStats.length > 0) {
+                        const labelFeatures: GeoJSON.Feature<GeoJSON.LineString, { description: string }>[] = [];
+                        for (const leg of route.legStats) {
+                            if (leg.geometry) {
+                                labelFeatures.push({
+                                    type: 'Feature',
+                                    properties: {
+                                        description: `${Math.round(leg.durationMinutes)} min (${leg.distanceMiles.toFixed(1)} mi)`
+                                    },
+                                    geometry: leg.geometry
+                                });
+                            }
+                        }
+                        if (labelFeatures.length > 0) {
+                            const labelSourceId = `${sourceId}-labels`;
+                            map.addSource(labelSourceId, {
+                                type: 'geojson',
+                                data: { type: 'FeatureCollection', features: labelFeatures }
+                            });
+                            map.addLayer({
+                                id: `${labelSourceId}-layer`,
+                                type: 'symbol',
+                                source: labelSourceId,
+                                layout: {
+                                    'symbol-placement': 'line',
+                                    'text-field': ['get', 'description'],
+                                    'text-size': state.settings.mapLabelTextSize || 12,
+                                    'text-max-angle': 30,
+                                    'text-pitch-alignment': 'viewport',
+                                    'symbol-spacing': 250,
+                                    'text-keep-upright': true
+                                },
+                                paint: {
+                                    'text-color': route.color,
+                                    'text-halo-color': resolvedTheme === 'dark' ? '#1f2937' : '#ffffff',
+                                    'text-halo-width': 2,
+                                    'text-opacity': opacity
+                                },
+                                minzoom: 12.5
+                            });
+                            routeSourcesRef.current.add(labelSourceId);
+                        }
+                    }
                 } else if (route.stopIds.length >= 2) {
                     const stopCoords = route.stopIds
                         .map(id => state.stops[id]?.coordinates)
@@ -359,7 +403,7 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
         if (map.isStyleLoaded()) handleStyleLoad();
         map.on('style.load', handleStyleLoad);
         return () => { map.off('style.load', handleStyleLoad); };
-    }, [visibleRoutes, state.stops, state.settings]);
+    }, [visibleRoutes, state.stops, state.settings, state.selectedRouteId, resolvedTheme]);
 
     // Fit bounds
     useEffect(() => {
@@ -413,9 +457,11 @@ export function MapView({ onStopClick, onStopDetail }: MapViewProps) {
                 <h4 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: 'var(--text-secondary)' }}>Legend</h4>
                 {state.activeServiceMode === 'mulch' ? (
                     <>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['black'] }} /> Black Mulch</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['aromatic cedar'] }} /> Aromatic Cedar</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: MULCH_COLORS['fine shredded hardwood'] }} /> Hardwood</div>
+                        {(state.settings.mulchTypes || []).map(t => (
+                            <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: getMulchColor(t) }} /> {t}
+                            </div>
+                        ))}
                     </>
                 ) : (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ width: 14, height: 14, minWidth: 14, borderRadius: '50%', background: '#6366f1' }} /> Spreading Only</div>

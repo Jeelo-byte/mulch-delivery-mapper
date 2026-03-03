@@ -149,6 +149,16 @@ export function Header({ onUploadClick, onSettingsClick }: HeaderProps) {
                         <button onClick={handleExportJSON} className="btn btn-ghost" title="Export JSON">
                             <Download size={18} />
                         </button>
+                        <button onClick={() => fileInputRef.current?.click()} className="btn btn-ghost" title="Import JSON">
+                            <UploadCloud size={18} />
+                            <input
+                                type="file"
+                                ref={fileInputRef}
+                                style={{ display: 'none' }}
+                                accept=".json"
+                                onChange={handleImportJSON}
+                            />
+                        </button>
                         <button onClick={onSettingsClick} className="btn btn-ghost" title="Settings & Statistics">
                             <Settings size={18} />
                         </button>

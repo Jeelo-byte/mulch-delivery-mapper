@@ -7,71 +7,72 @@ import { computeRouteETAs, formatMinutes } from './eta-calculator';
  * Generate and open a comprehensive operations summary PDF report.
  */
 export function exportSummaryReport(state: AppState): void {
-    const routes = Object.values(state.routes);
-    const stops = Object.values(state.stops);
-    const vehicles = Object.values(state.vehicles);
-    const deliveryRoutes = routes.filter(r => r.serviceMode === 'mulch');
-    const spreadingRoutes = routes.filter(r => r.serviceMode === 'spreading');
+  const routes = Object.values(state.routes);
+  const stops = Object.values(state.stops);
+  const vehicles = Object.values(state.vehicles);
+  const deliveryRoutes = routes.filter(r => r.serviceMode === 'mulch');
+  const spreadingRoutes = routes.filter(r => r.serviceMode === 'spreading');
 
-    // ── Aggregate bag / mulch-type metrics ──────────────────────────────────
-    const bagsByType: Record<string, number> = {};
-    let totalBagsDelivered = 0;
-    let totalBagsSpread = 0;
-    let totalStops = 0;
-    let assignedStops = 0;
-    const scoutSales: Record<string, number> = {};
+  // ── Aggregate bag / mulch-type metrics ──────────────────────────────────
+  const bagsByType: Record<string, number> = {};
+  let totalBagsDelivered = 0;
+  let totalBagsSpread = 0;
+  let totalStops = 0;
+  let assignedStops = 0;
+  const scoutSales: Record<string, number> = {};
 
-    stops.forEach(stop => {
-        if (stop.isDisabled) return;
-        totalStops++;
-        const isAssigned = !!(stop.routeId || stop.spreadingRouteId);
-        if (isAssigned) assignedStops++;
+  stops.forEach(stop => {
+    if (stop.isDisabled) return;
+    totalStops++;
+    const isAssigned = !!(stop.routeId || stop.spreadingRouteId);
+    if (isAssigned) assignedStops++;
 
-        stop.mulchOrders.forEach(order => {
-            bagsByType[order.mulchType] = (bagsByType[order.mulchType] || 0) + order.quantity;
-            totalBagsDelivered += order.quantity;
-            if (order.scoutName) {
-                scoutSales[order.scoutName] = (scoutSales[order.scoutName] || 0) + order.quantity;
-            }
-        });
-        if (stop.spreadingOrder) {
-            totalBagsSpread += stop.spreadingOrder.quantity;
-        }
+    stop.mulchOrders.forEach(order => {
+      bagsByType[order.mulchType] = (bagsByType[order.mulchType] || 0) + order.quantity;
+      totalBagsDelivered += order.quantity;
+      if (order.scoutName) {
+        scoutSales[order.scoutName] = (scoutSales[order.scoutName] || 0) + order.quantity;
+      }
     });
+    if (stop.spreadingOrder) {
+      totalBagsSpread += stop.spreadingOrder.quantity;
+    }
+  });
 
-    // ── Route-level metrics ─────────────────────────────────────────────────
-    let totalMiles = 0;
-    let totalDriveMins = 0;
-    let totalLaborMins = 0;
-    let totalFuelCost = 0;
+  // ── Route-level metrics ─────────────────────────────────────────────────
+  let totalMiles = 0;
+  let totalDriveMins = 0;
+  let totalLaborMins = 0;
+  let totalFuelCost = 0;
 
-    const routeRows: string[] = [];
-    for (const route of [...deliveryRoutes, ...spreadingRoutes]) {
-        const vehicle = state.vehicles[route.vehicleId];
-        const etaInfos = computeRouteETAs(route, state);
-        const routeLaborMins = etaInfos.reduce((s, e) => s + e.timeAtStop, 0);
-        const routeBags = route.stopIds.reduce((sum, id) => {
-            const stop = state.stops[id];
-            if (!stop) return sum;
-            return sum + (route.serviceMode === 'spreading'
-                ? (stop.spreadingOrder?.quantity || 0)
-                : stop.totalBags);
-        }, 0);
-        const routeMiles = route.distanceMiles || 0;
-        const routeDrive = route.durationMinutes || 0;
-        const vehicleFuelRate = vehicle?.fuelCostPerMile ?? 0;
-        const routeFuel = routeMiles > 0 && vehicleFuelRate > 0
-            ? routeMiles * vehicleFuelRate : 0;
+  const routeRows: string[] = [];
+  for (const route of [...deliveryRoutes, ...spreadingRoutes]) {
+    const vehicle = state.vehicles[route.vehicleId];
+    const etaResult = computeRouteETAs(route, state);
+    const routeLaborMins = etaResult.stops.reduce((s, e) => s + e.timeAtStop, 0);
+    const routeBags = route.stopIds.reduce((sum, id) => {
+      const stop = state.stops[id];
+      if (!stop) return sum;
+      return sum + (route.serviceMode === 'spreading'
+        ? (stop.spreadingOrder?.quantity || 0)
+        : stop.totalBags);
+    }, 0);
+    const routeMiles = route.distanceMiles || 0;
+    const routeDrive = route.durationMinutes || 0;
+    const vehicleFuelRate = vehicle?.fuelCostPerMile ?? 0;
+    const routeFuel = routeMiles > 0 && vehicleFuelRate > 0
+      ? routeMiles * vehicleFuelRate : 0;
 
-        totalMiles += routeMiles;
-        totalDriveMins += routeDrive;
-        totalLaborMins += routeLaborMins;
-        totalFuelCost += routeFuel;
+    totalMiles += routeMiles;
+    totalDriveMins += routeDrive;
+    totalLaborMins += routeLaborMins;
+    totalFuelCost += routeFuel;
 
-        const totalTime = routeDrive + routeLaborMins;
-        const serviceIcon = route.serviceMode === 'spreading' ? '🌱' : '🚛';
+    const totalTime = routeDrive + routeLaborMins + (etaResult.lunchBreak ? etaResult.lunchBreak.durationMins : 0);
+    const serviceIcon = route.serviceMode === 'spreading' ? '🌱' : '🚛';
+    const lunchStr = etaResult.lunchBreak ? `${formatMinutes(etaResult.lunchBreak.startMins)} - ${formatMinutes(etaResult.lunchBreak.startMins + etaResult.lunchBreak.durationMins)}` : '—';
 
-        routeRows.push(`<tr>
+    routeRows.push(`<tr>
             <td style="color:${route.color};font-weight:700">${serviceIcon} ${route.name}</td>
             <td>${vehicle?.name || '—'}</td>
             <td style="text-align:center">${route.stopIds.length}</td>
@@ -79,27 +80,28 @@ export function exportSummaryReport(state: AppState): void {
             <td style="text-align:center">${routeMiles > 0 ? routeMiles.toFixed(1) + ' mi' : '—'}</td>
             <td style="text-align:center">${routeDrive > 0 ? Math.round(routeDrive) + ' min' : '—'}</td>
             <td style="text-align:center">${routeLaborMins > 0 ? Math.round(routeLaborMins) + ' min' : '—'}</td>
+            <td style="text-align:center;font-size:11px;white-space:nowrap">${lunchStr}</td>
             <td style="text-align:center">${totalTime > 0 ? Math.round(totalTime) + ' min' : '—'}</td>
             <td style="text-align:center">${routeFuel > 0 ? '$' + routeFuel.toFixed(2) : '—'}</td>
             <td style="text-align:center">${route.mulchType || (route.serviceMode === 'spreading' ? 'Spreading' : 'Mixed')}</td>
         </tr>`);
-    }
+  }
 
-    // ── Vehicle utilization ─────────────────────────────────────────────────
-    const vehicleRows: string[] = [];
-    vehicles.forEach(v => {
-        const assignedRoutes = routes.filter(r => r.vehicleId === v.id);
-        const totalVehicleBags = assignedRoutes.reduce((sum, r) => {
-            return sum + r.stopIds.reduce((s, id) => s + (state.stops[id]?.totalBags || 0), 0);
-        }, 0);
-        const cap = v.maxBagCapacity !== 9999 ? v.maxBagCapacity : null;
-        const utilPct = cap ? Math.round((totalVehicleBags / cap) * 100) : null;
-        const utilBar = utilPct !== null
-            ? `<div style="background:#e5e7eb;border-radius:4px;height:8px;width:80px;display:inline-block;vertical-align:middle;margin-left:6px">
+  // ── Vehicle utilization ─────────────────────────────────────────────────
+  const vehicleRows: string[] = [];
+  vehicles.forEach(v => {
+    const assignedRoutes = routes.filter(r => r.vehicleId === v.id);
+    const totalVehicleBags = assignedRoutes.reduce((sum, r) => {
+      return sum + r.stopIds.reduce((s, id) => s + (state.stops[id]?.totalBags || 0), 0);
+    }, 0);
+    const cap = v.maxBagCapacity !== 9999 ? v.maxBagCapacity : null;
+    const utilPct = cap ? Math.round((totalVehicleBags / cap) * 100) : null;
+    const utilBar = utilPct !== null
+      ? `<div style="background:#e5e7eb;border-radius:4px;height:8px;width:80px;display:inline-block;vertical-align:middle;margin-left:6px">
                  <div style="background:${utilPct > 90 ? '#ef4444' : utilPct > 70 ? '#f59e0b' : '#22c55e'};height:8px;border-radius:4px;width:${Math.min(utilPct, 100)}%"></div>
                </div> ${utilPct}%`
-            : '<span style="color:#888">N/A</span>';
-        vehicleRows.push(`<tr>
+      : '<span style="color:#888">N/A</span>';
+    vehicleRows.push(`<tr>
             <td>${v.name}</td>
             <td style="text-align:center">${v.type}</td>
             <td style="text-align:center">${cap ?? 'Unlimited'}</td>
@@ -107,66 +109,66 @@ export function exportSummaryReport(state: AppState): void {
             <td style="text-align:center">${assignedRoutes.length}</td>
             <td style="text-align:center">${v.fuelCostPerMile ? '$' + v.fuelCostPerMile.toFixed(3) + '/mi' : '—'}</td>
         </tr>`);
-    });
+  });
 
-    // ── Scout sales leaderboard ─────────────────────────────────────────────
-    const sortedScouts = Object.entries(scoutSales)
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 20);
-    const scoutRows = sortedScouts.map(([name, bags], i) =>
-        `<tr>
+  // ── Scout sales leaderboard ─────────────────────────────────────────────
+  const sortedScouts = Object.entries(scoutSales)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 20);
+  const scoutRows = sortedScouts.map(([name, bags], i) =>
+    `<tr>
             <td style="text-align:center;font-weight:700;color:#6366f1">${i + 1}</td>
             <td>${name}</td>
             <td style="text-align:center;font-weight:700">${bags}</td>
             <td style="text-align:center">${((bags / totalBagsDelivered) * 100).toFixed(1)}%</td>
         </tr>`
-    ).join('');
+  ).join('');
 
-    // ── Mulch type breakdown ────────────────────────────────────────────────
-    const mulchTypeRows = Object.entries(bagsByType)
-        .sort(([, a], [, b]) => b - a)
-        .map(([type, bags]) => {
-            const pct = totalBagsDelivered > 0 ? ((bags / totalBagsDelivered) * 100).toFixed(1) : '0';
-            const bar = `<div style="background:#e5e7eb;border-radius:4px;height:10px;width:120px;display:inline-block;vertical-align:middle">
+  // ── Mulch type breakdown ────────────────────────────────────────────────
+  const mulchTypeRows = Object.entries(bagsByType)
+    .sort(([, a], [, b]) => b - a)
+    .map(([type, bags]) => {
+      const pct = totalBagsDelivered > 0 ? ((bags / totalBagsDelivered) * 100).toFixed(1) : '0';
+      const bar = `<div style="background:#e5e7eb;border-radius:4px;height:10px;width:120px;display:inline-block;vertical-align:middle">
                 <div style="background:#3b82f6;height:10px;border-radius:4px;width:${pct}%"></div>
               </div>`;
-            return `<tr>
+      return `<tr>
                 <td>${type}</td>
                 <td style="text-align:center;font-weight:700">${bags}</td>
                 <td style="text-align:center">${pct}%</td>
                 <td>${bar}</td>
             </tr>`;
-        }).join('');
+    }).join('');
 
-    // ── Schedule info ───────────────────────────────────────────────────────
-    const deliveryDateStr = state.settings.deliveryDate
-        ? new Date(state.settings.deliveryDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-        : '—';
-    const spreadingDateStr = state.settings.spreadingDate
-        ? new Date(state.settings.spreadingDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-        : '—';
-    const deliveryStartStr = formatMinutes(
-        (state.settings.deliveryStartTime || '08:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
-    );
-    const spreadingStartStr = formatMinutes(
-        (state.settings.spreadingStartTime || '09:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
-    );
-    const lunchStartStr = formatMinutes(
-        (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
-    );
-    const lunchDur = state.settings.lunchBreakDuration ?? 30;
-    const lunchEndStr = formatMinutes(
-        (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0) + lunchDur
-    );
+  // ── Schedule info ───────────────────────────────────────────────────────
+  const deliveryDateStr = state.settings.deliveryDate
+    ? new Date(state.settings.deliveryDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+    : '—';
+  const spreadingDateStr = state.settings.spreadingDate
+    ? new Date(state.settings.spreadingDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+    : '—';
+  const deliveryStartStr = formatMinutes(
+    (state.settings.deliveryStartTime || '08:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
+  );
+  const spreadingStartStr = formatMinutes(
+    (state.settings.spreadingStartTime || '09:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
+  );
+  const lunchStartStr = formatMinutes(
+    (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0)
+  );
+  const lunchDur = state.settings.lunchBreakDuration ?? 30;
+  const lunchEndStr = formatMinutes(
+    (state.settings.lunchBreakStartTime || '12:00').split(':').reduce((h, m) => h * 60 + Number(m), 0) + lunchDur
+  );
 
-    // ── Total estimated time (drive + labor + breaks) ───────────────────────
-    const totalBreakMins = lunchDur; // one break per route crew — approximate
-    const grandTotalMins = totalDriveMins + totalLaborMins;
+  // ── Total estimated time (drive + labor + breaks) ───────────────────────
+  const totalBreakMins = lunchDur; // one break per route crew — approximate
+  const grandTotalMins = totalDriveMins + totalLaborMins;
 
-    // ── Build HTML ──────────────────────────────────────────────────────────
-    const generatedAt = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' });
+  // ── Build HTML ──────────────────────────────────────────────────────────
+  const generatedAt = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' });
 
-    const html = `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -311,6 +313,7 @@ export function exportSummaryReport(state: AppState): void {
         <th style="text-align:center">Miles</th>
         <th style="text-align:center">Drive</th>
         <th style="text-align:center">Labor</th>
+        <th style="text-align:center">Lunch Break</th>
         <th style="text-align:center">Total Time</th>
         <th style="text-align:center">Fuel</th>
         <th style="text-align:center">Type</th>
@@ -323,6 +326,7 @@ export function exportSummaryReport(state: AppState): void {
         <td style="text-align:center"><strong>${totalMiles > 0 ? totalMiles.toFixed(1) + ' mi' : '—'}</strong></td>
         <td style="text-align:center"><strong>${totalDriveMins > 0 ? Math.round(totalDriveMins) + ' min' : '—'}</strong></td>
         <td style="text-align:center"><strong>${Math.round(totalLaborMins)} min</strong></td>
+        <td style="text-align:center"><strong>—</strong></td>
         <td style="text-align:center"><strong>${grandTotalMins > 0 ? Math.round(grandTotalMins) + ' min' : '—'}</strong></td>
         <td style="text-align:center"><strong>${totalFuelCost > 0 ? '$' + totalFuelCost.toFixed(2) : '—'}</strong></td>
         <td></td>
@@ -355,9 +359,9 @@ export function exportSummaryReport(state: AppState): void {
 </body>
 </html>`;
 
-    const win = window.open('', '_blank');
-    if (win) {
-        win.document.write(html);
-        win.document.close();
-    }
+  const win = window.open('', '_blank');
+  if (win) {
+    win.document.write(html);
+    win.document.close();
+  }
 }

@@ -60,7 +60,7 @@ export interface ParsedLineItem {
 }
 
 // ── Mulch type enum ──
-export type MulchType = 'Black' | 'Aromatic Cedar' | 'Fine Shredded Hardwood';
+export type MulchType = string;
 
 // ── A mulch order within a delivery stop ──
 export interface MulchOrder {
@@ -106,7 +106,7 @@ export interface DeliveryStop {
 }
 
 // ── Vehicle types ──
-export type VehicleType = 'Truck' | 'Trailer' | 'Car';
+export type VehicleType = string;
 
 export interface Vehicle {
   id: string;
@@ -132,7 +132,7 @@ export interface Route {
   routeGeometry: GeoJSON.LineString | null;
   distanceMiles: number | null;     // total route distance
   durationMinutes: number | null;   // total drive time
-  legStats?: { distanceMiles: number; durationMinutes: number }[];
+  legStats?: { distanceMiles: number; durationMinutes: number; geometry?: GeoJSON.LineString }[];
   lifoLoadingManifest?: string[];   // For driver LIFO loading
 }
 
@@ -170,6 +170,12 @@ export interface AppSettings {
   spreadingDate: string;       // YYYY-MM-DD date for spreading crew (defaults same day)
   lunchBreakStartTime?: string;
   lunchBreakDuration?: number;
+  mapLineThickness?: number;
+  mapSelectedLineThickness?: number;
+  mapPinScale?: number;
+  mapLabelTextSize?: number;
+  mulchTypes: string[];
+  vehicleTypes: string[];
 }
 
 // ── Optimization mode ──
@@ -246,6 +252,8 @@ export type AppAction =
   | { type: 'REORDER_ROUTE_STOPS'; payload: { routeId: string; stopIds: string[] } }
   | { type: 'MOVE_STOP_BETWEEN_ROUTES'; payload: { stopId: string; sourceRouteId: string; destRouteId: string; destIndex: number } }
   | { type: 'TOGGLE_ROUTE_VISIBILITY'; payload: string }
+  | { type: 'ISOLATE_ROUTE'; payload: string }
+  | { type: 'ISOLATE_VEHICLE_ROUTES'; payload: string }
   | { type: 'BATCH_CREATE_ROUTES'; payload: Route[] }
   | { type: 'BATCH_ASSIGN_STOPS'; payload: { assignments: { stopId: string; routeId: string }[] } }
   | { type: 'SET_SERVICE_MODE'; payload: 'mulch' | 'spreading' }
@@ -262,5 +270,5 @@ export type AppAction =
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_GEOCODING_PROGRESS'; payload: { progress: number; total: number } }
   | { type: 'SET_ROUTE_GEOMETRY'; payload: { routeId: string; geometry: GeoJSON.LineString } }
-  | { type: 'SET_ROUTE_STATS'; payload: { routeId: string; distanceMiles: number; durationMinutes: number; legStats?: { distanceMiles: number; durationMinutes: number }[] } }
+  | { type: 'SET_ROUTE_STATS'; payload: { routeId: string; distanceMiles: number; durationMinutes: number; legStats?: { distanceMiles: number; durationMinutes: number; geometry?: GeoJSON.LineString }[] } }
   | { type: 'RESTORE_STATE'; payload: Partial<AppState> };

@@ -1,7 +1,8 @@
 'use client';
 
 import type { AppState } from './types';
-import { computeRouteETAs, formatMinutes } from './eta-calculator';
+import { computeRouteETAs, computeRouteEffectiveStartMins, computeRouteEndMins, formatMinutes } from './eta-calculator';
+import { getMulchColor } from './color-utils';
 
 /**
  * Export route(s) to CSV with detailed stop information
@@ -47,7 +48,7 @@ export function exportRoutesToCSV(
         const fuelRate = vehicle?.fuelCostPerMile ?? 0;
         const fuelCost = route.distanceMiles && fuelRate > 0 ? (route.distanceMiles * fuelRate).toFixed(2) : '';
 
-        const etaMap = new Map(computeRouteETAs(route, state).map(e => [e.stopId, e]));
+        const etaMap = new Map(computeRouteETAs(route, state).stops.map(e => [e.stopId, e]));
 
         route.stopIds.forEach((stopId, idx) => {
             const stop = state.stops[stopId];
@@ -141,9 +142,19 @@ export function exportRoutesToPDF(
     state: AppState,
     routeIds?: string[]
 ) {
-    const routes = routeIds
+    const unorderedRoutes = routeIds
         ? routeIds.map(id => state.routes[id]).filter(Boolean)
         : Object.values(state.routes);
+
+    // Group by vehicle, then sort by effective start time
+    const routes = [...unorderedRoutes].sort((a, b) => {
+        const vA = state.vehicles[a.vehicleId]?.name || '';
+        const vB = state.vehicles[b.vehicleId]?.name || '';
+        if (vA !== vB) return vA.localeCompare(vB);
+        const startA = computeRouteEffectiveStartMins(a, state);
+        const startB = computeRouteEffectiveStartMins(b, state);
+        return startA - startB;
+    });
 
     const fuelRate_unused = null; // fuel cost is now per-vehicle
     const depotAddr = state.settings.depotAddress || 'Not set';
@@ -171,9 +182,6 @@ export function exportRoutesToPDF(
     tr:nth-child(even) { background: #f9fafb; }
     .stop-num { font-weight: 700; width: 30px; text-align: center; }
     .mulch-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
-    .mulch-black { background: #1f2937; color: white; }
-    .mulch-cedar { background: #d97706; color: white; }
-    .mulch-hardwood { background: #92400e; color: white; }
     .totals { font-weight: 700; background: #e5e7eb; }
     .notes { font-size: 10px; color: #888; font-style: italic; }
     .time-col { white-space: nowrap; font-size: 11px; color: #4b5563; }
@@ -201,23 +209,23 @@ export function exportRoutesToPDF(
             ? (route.distanceMiles * vehicleFuelRate).toFixed(2)
             : '—';
 
-        const mulchClass = (t: string) => {
-            if (t.toLowerCase().includes('black')) return 'mulch-black';
-            if (t.toLowerCase().includes('cedar')) return 'mulch-cedar';
-            return 'mulch-hardwood';
-        };
+
 
         // Compute ETAs for this route
-        const etaInfos = computeRouteETAs(route, state);
+        const etaResult = computeRouteETAs(route, state);
+        const etaInfos = etaResult.stops;
+        const routeLunch = etaResult.lunchBreak;
         const etaMap = new Map(etaInfos.map(e => [e.stopId, e]));
         const totalLaborMins = etaInfos.reduce((s, e) => s + e.timeAtStop, 0);
-        const totalTimeMins = (route.durationMinutes || 0) + totalLaborMins;
+        const totalTimeMins = (route.durationMinutes || 0) + totalLaborMins + (routeLunch ? routeLunch.durationMins : 0);
 
-        // Determine start time display
-        const startTimeStr = formatMinutes(
-            (route.serviceMode === 'spreading' ? (state.settings.spreadingStartTime || '09:00') : (state.settings.deliveryStartTime || '08:00'))
-                .split(':').reduce((h, m) => h * 60 + Number(m), 0)
-        );
+        // Effective start time — accounts for prior trips on the same vehicle
+        const effectiveStartMins = computeRouteEffectiveStartMins(route, state);
+        const startTimeStr = formatMinutes(effectiveStartMins);
+
+        // Return-to-depot time
+        const returnMins = computeRouteEndMins(route, state, effectiveStartMins);
+        const returnTimeStr = formatMinutes(returnMins);
 
         html += `
 <div class="route-section">
@@ -248,11 +256,26 @@ export function exportRoutesToPDF(
         </tr></thead>
         <tbody>`;
 
-        // Compute lunch break window for this route
-        const lunchStartMins = (state.settings.lunchBreakStartTime || '12:00')
-            .split(':').reduce((h: number, m: string) => h * 60 + Number(m), 0);
-        const lunchDurMins = state.settings.lunchBreakDuration ?? 30;
         let lunchRowInserted = false;
+
+        // Lunch break reference for this route
+        const checkInsertLunch = (currentMinsAfterEvent: number) => {
+            if (!lunchRowInserted && routeLunch && currentMinsAfterEvent >= routeLunch.startMins) {
+                lunchRowInserted = true;
+                const startStr = formatMinutes(routeLunch.startMins);
+                const endStr = formatMinutes(routeLunch.startMins + routeLunch.durationMins);
+                return `<tr style="background:#fef9c3; border-left: 4px solid #f59e0b;">
+                    <td class="stop-num" style="font-size:16px;">🍽️</td>
+                    <td><strong>${startStr}</strong></td>
+                    <td class="time-col">${routeLunch.durationMins} min</td>
+                    <td colspan="7" style="font-weight:600; color:#92400e;">
+                        LUNCH BREAK &nbsp;•&nbsp; ${startStr} – ${endStr}
+                        &nbsp;(${routeLunch.durationMins} min)
+                    </td>
+                </tr>`;
+            }
+            return '';
+        };
 
         // Depot start row
         if (depotAddr !== 'Not set') {
@@ -267,24 +290,12 @@ export function exportRoutesToPDF(
             const etaStr = eta?.etaStr ?? '—';
             const timeAtStop = eta ? Math.round(eta.timeAtStop) : 0;
 
-            // Insert lunch break row before the first stop whose arrival is after lunch start
-            if (!lunchRowInserted && eta && eta.cumulativeMins >= lunchStartMins) {
-                const lunchEndMins = lunchStartMins + lunchDurMins;
-                html += `<tr style="background:#fef9c3; border-left: 4px solid #f59e0b;">
-                    <td class="stop-num" style="font-size:16px;">🍽️</td>
-                    <td><strong>${formatMinutes(lunchStartMins)}</strong></td>
-                    <td class="time-col">${lunchDurMins} min</td>
-                    <td colspan="7" style="font-weight:600; color:#92400e;">
-                        LUNCH BREAK &nbsp;•&nbsp; ${formatMinutes(lunchStartMins)} – ${formatMinutes(lunchEndMins)}
-                        &nbsp;(${lunchDurMins} min)
-                    </td>
-                </tr>`;
-                lunchRowInserted = true;
-            }
+            // Insert lunch break row before the first stop whose arrival crosses the lunch window
+            html += checkInsertLunch(eta?.cumulativeMins ?? 0);
 
             const streetAddr = stop.fullAddress.split(',')[0]?.trim() || stop.fullAddress;
             const mulchInfo = stop.mulchOrders.map(o =>
-                `<span class="mulch-tag ${mulchClass(o.mulchType)}">${o.mulchType}</span>`
+                `<span class="mulch-tag" style="background-color: ${getMulchColor(o.mulchType)}; color: white;">${o.mulchType}</span>`
             ).join(' ');
             const qtyInfo = stop.mulchOrders.map(o => o.quantity).join(', ') || (stop.spreadingOrder ? stop.spreadingOrder.quantity : '');
             const mapLink = `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(stop.fullAddress)}" target="_blank" style="color: #3b82f6; text-decoration: underline;">Open Map</a>`;
@@ -305,11 +316,20 @@ export function exportRoutesToPDF(
                 <td>${mapLink}</td>
                 <td class="notes">${notesArr.join('; ') || '—'}</td>
             </tr>`;
+
+            // Insert lunch break AFTER this stop if labor passed lunch
+            html += checkInsertLunch((eta?.cumulativeMins ?? 0) + timeAtStop);
         });
+
+        // Insert lunch break BEFORE return row if return drive passed lunch
+        html += checkInsertLunch(returnMins);
 
         // Return to depot row
         if (depotAddr !== 'Not set') {
-            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td>—</td><td>—</td><td colspan="7"><strong>RETURN:</strong> ${depotAddr}</td></tr>`;
+            const returnTimeDisplay = route.legStats && route.legStats.length > 0
+                ? `<strong>${returnTimeStr}</strong>`
+                : '—';
+            html += `<tr style="background:#dbeafe"><td class="stop-num">🏠</td><td>${returnTimeDisplay}</td><td>—</td><td colspan="7"><strong>RETURN:</strong> ${depotAddr}</td></tr>`;
         }
 
         html += `<tr class="totals"><td></td><td></td><td>${totalLaborMins > 0 ? `${Math.round(totalLaborMins)} min labor` : ''}</td><td colspan="4">Total</td><td>${totalBags}</td><td colspan="2">Total time: ${totalTimeMins > 0 ? Math.round(totalTimeMins) + ' min' : '—'}</td></tr>`;

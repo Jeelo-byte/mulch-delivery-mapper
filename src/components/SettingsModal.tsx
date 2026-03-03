@@ -32,6 +32,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     const [lunchStart, setLunchStart] = useState(state.settings.lunchBreakStartTime || '12:00');
     const [lunchDuration, setLunchDuration] = useState((state.settings.lunchBreakDuration || 30).toString());
 
+    // Map Styling
+    const [mapLineThickness, setMapLineThickness] = useState((state.settings.mapLineThickness || 4).toString());
+    const [mapSelectedLineThickness, setMapSelectedLineThickness] = useState((state.settings.mapSelectedLineThickness || 6).toString());
+    const [mapPinScale, setMapPinScale] = useState((state.settings.mapPinScale || 1.0).toString());
+    const [mapLabelTextSize, setMapLabelTextSize] = useState((state.settings.mapLabelTextSize || 12).toString());
+
+    // Custom Types
+    const [mulchTypesStr, setMulchTypesStr] = useState((state.settings.mulchTypes || []).join(', '));
+    const [vehicleTypesStr, setVehicleTypesStr] = useState((state.settings.vehicleTypes || []).join(', '));
+
     const syncDates = () => setSpreadingDate(deliveryDate);
 
     const handleSave = async () => {
@@ -62,8 +72,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 depotAddress: depot,
                 depotCoords,
                 enforceWeightLimits,
-                laborTimePerSpreadBag: parseInt(laborTime) || 3,
-                timeSpentPerDeliveryBag: parseInt(deliveryBagTime) || 2,
+                laborTimePerSpreadBag: parseFloat(laborTime) || (laborTime === '0' ? 0 : 3),
+                timeSpentPerDeliveryBag: parseFloat(deliveryBagTime) || (deliveryBagTime === '0' ? 0 : 2),
                 routeGenerationMode: generationMode,
                 deliveryStartTime: deliveryStart,
                 spreadingStartTime: spreadingStart,
@@ -71,6 +81,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 spreadingDate,
                 lunchBreakStartTime: lunchStart,
                 lunchBreakDuration: parseInt(lunchDuration) || 30,
+                mapLineThickness: parseInt(mapLineThickness) || 4,
+                mapSelectedLineThickness: parseInt(mapSelectedLineThickness) || 6,
+                mapPinScale: parseFloat(mapPinScale) || 1.0,
+                mapLabelTextSize: parseInt(mapLabelTextSize) || 12,
+                mulchTypes: mulchTypesStr.split(',').map(s => s.trim()).filter(Boolean),
+                vehicleTypes: vehicleTypesStr.split(',').map(s => s.trim()).filter(Boolean),
             },
         });
         onClose();
@@ -86,9 +102,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     // Compute stats — use per-vehicle fuel cost
     const routeStats = Object.values(state.routes).map(route => {
         const vehicle = state.vehicles[route.vehicleId];
-        const totalBags = route.stopIds.reduce(
-            (sum, id) => sum + (state.stops[id]?.totalBags || 0), 0
-        );
+        const totalBags = route.stopIds.reduce((sum, id) => {
+            const stop = state.stops[id];
+            if (!stop) return sum;
+            return sum + (route.serviceMode === 'spreading' ? (stop.spreadingOrder?.quantity || 0) : stop.totalBags);
+        }, 0);
         const vehicleFuelRate = vehicle?.fuelCostPerMile ?? 0;
         const fuelCostVal = route.distanceMiles && vehicleFuelRate > 0
             ? route.distanceMiles * vehicleFuelRate
@@ -138,7 +156,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                 <div className="form-field">
                                     <label className="form-label">Labor Time per Spread Bag (mins)</label>
                                     <input
-                                        type="number" min="1"
+                                        type="number" min="0" step="any"
                                         value={laborTime}
                                         onChange={(e) => setLaborTime(e.target.value)}
                                         className="input"
@@ -147,7 +165,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                 <div className="form-field">
                                     <label className="form-label">Time Spent per Delivery Bag (mins)</label>
                                     <input
-                                        type="number" min="0" step="0.5"
+                                        type="number" min="0" step="any"
                                         value={deliveryBagTime}
                                         onChange={(e) => setDeliveryBagTime(e.target.value)}
                                         className="input"
@@ -272,6 +290,89 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                         value={lunchDuration}
                                         onChange={(e) => setLunchDuration(e.target.value)}
                                         className="input"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Custom Types */}
+                        <div className="modal-section">
+                            <h3 className="modal-section-title">Custom Types</h3>
+                            <div className="form-grid">
+                                <div className="form-field form-field-full">
+                                    <label className="form-label">Mulch Types (comma-separated)</label>
+                                    <input
+                                        value={mulchTypesStr}
+                                        onChange={(e) => setMulchTypesStr(e.target.value)}
+                                        className="input"
+                                        placeholder="Black, Brown, Red..."
+                                    />
+                                    <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                                        Make sure these perfectly match the &quot;Item Variation&quot; names from your CSV.
+                                    </p>
+                                </div>
+                                <div className="form-field form-field-full">
+                                    <label className="form-label">Vehicle Types (comma-separated)</label>
+                                    <input
+                                        value={vehicleTypesStr}
+                                        onChange={(e) => setVehicleTypesStr(e.target.value)}
+                                        className="input"
+                                        placeholder="Truck, Trailer, Van..."
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Map Aesthetics */}
+                        <div className="modal-section">
+                            <h3 className="modal-section-title">Map Styling Customization</h3>
+                            <div className="form-grid">
+                                <div className="form-field">
+                                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        Base Line Thickness <span>{mapLineThickness}px</span>
+                                    </label>
+                                    <input
+                                        type="range" min="2" max="12" step="1"
+                                        value={mapLineThickness}
+                                        onChange={(e) => setMapLineThickness(e.target.value)}
+                                        className="input"
+                                        style={{ padding: 0 }}
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        Selected Line Thickness <span>{mapSelectedLineThickness}px</span>
+                                    </label>
+                                    <input
+                                        type="range" min="2" max="16" step="1"
+                                        value={mapSelectedLineThickness}
+                                        onChange={(e) => setMapSelectedLineThickness(e.target.value)}
+                                        className="input"
+                                        style={{ padding: 0 }}
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        Map Pin Size <span>{mapPinScale}x</span>
+                                    </label>
+                                    <input
+                                        type="range" min="0.5" max="2.0" step="0.1"
+                                        value={mapPinScale}
+                                        onChange={(e) => setMapPinScale(e.target.value)}
+                                        className="input"
+                                        style={{ padding: 0 }}
+                                    />
+                                </div>
+                                <div className="form-field">
+                                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        Route Text Size <span>{mapLabelTextSize}px</span>
+                                    </label>
+                                    <input
+                                        type="range" min="8" max="24" step="1"
+                                        value={mapLabelTextSize}
+                                        onChange={(e) => setMapLabelTextSize(e.target.value)}
+                                        className="input"
+                                        style={{ padding: 0 }}
                                     />
                                 </div>
                             </div>

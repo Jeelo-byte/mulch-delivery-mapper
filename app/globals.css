@@ -1103,7 +1103,7 @@ select.input {
   width: 36px;
   height: 36px;
   border-radius: 50% 50% 50% 0;
-  transform: rotate(-45deg);
+  transform: rotate(-45deg) scale(var(--pin-scale, 1));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1113,7 +1113,7 @@ select.input {
 }
 
 .map-marker:hover .marker-pin {
-  transform: rotate(-45deg) scale(1.15);
+  transform: rotate(-45deg) scale(calc(var(--pin-scale, 1) * 1.15));
 }
 
 .marker-count {
@@ -1131,7 +1131,7 @@ select.input {
 }
 
 .marker-selected .marker-pin {
-  transform: rotate(-45deg) scale(1.2);
+  transform: rotate(-45deg) scale(calc(var(--pin-scale, 1) * 1.2));
   box-shadow: 0 0 0 3px var(--accent), 0 2px 6px rgba(0, 0, 0, .3);
 }
 

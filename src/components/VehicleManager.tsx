@@ -17,7 +17,7 @@ export function VehicleManager() {
     const [isAdding, setIsAdding] = useState(false);
     const [editId, setEditId] = useState<string | null>(null);
     const [name, setName] = useState('');
-    const [type, setType] = useState<VehicleType>('Trailer');
+    const [type, setType] = useState<VehicleType>(state.settings.vehicleTypes?.[0] || 'Trailer');
     const [maxBagCapacity, setMaxBagCapacity] = useState(80);
     const [maxWeightLimit, setMaxWeightLimit] = useState(2000);
     const [fuelCostPerMile, setFuelCostPerMile] = useState(1.1);
@@ -31,11 +31,11 @@ export function VehicleManager() {
             setMaxBagCapacity(9999);
         } else {
             // eslint-disable-next-line react-hooks/set-state-in-effect
-            setType('Trailer');
+            setType(state.settings.vehicleTypes?.[0] || 'Trailer');
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setMaxBagCapacity(80);
         }
-    }, [state.activeServiceMode]);
+    }, [state.activeServiceMode, state.settings.vehicleTypes]);
 
     const vehicles = Object.values(state.vehicles).filter(v => v.serviceMode === state.activeServiceMode);
 
@@ -64,7 +64,7 @@ export function VehicleManager() {
             setType('Car');
             setMaxBagCapacity(9999);
         } else {
-            setType('Trailer');
+            setType(state.settings.vehicleTypes?.[0] || 'Trailer');
             setMaxBagCapacity(80);
         }
         setMaxWeightLimit(2000);
@@ -148,8 +148,9 @@ export function VehicleManager() {
                                 <select value={type} onChange={(e) => handleTypeChange(e.target.value as VehicleType)} className="input">
                                     {state.activeServiceMode === 'mulch' ? (
                                         <>
-                                            <option value="Trailer">Trailer</option>
-                                            <option value="Truck">Truck</option>
+                                            {(state.settings.vehicleTypes || []).map(vt => (
+                                                <option key={vt} value={vt}>{vt}</option>
+                                            ))}
                                         </>
                                     ) : (
                                         <option value="Car">Car</option>

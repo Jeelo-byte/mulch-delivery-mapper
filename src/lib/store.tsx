@@ -23,6 +23,12 @@ const defaultSettings = {
     spreadingDate: todayISO,
     lunchBreakStartTime: '12:00',
     lunchBreakDuration: 30,
+    mapLineThickness: 4,
+    mapSelectedLineThickness: 6,
+    mapPinScale: 1.0,
+    mapLabelTextSize: 12,
+    mulchTypes: ['Black', 'Aromatic Cedar', 'Fine Shredded Hardwood'],
+    vehicleTypes: ['Truck', 'Trailer', 'Car'],
 };
 
 const initialState: AppState = {
@@ -426,6 +432,36 @@ function appReducer(state: AppState, action: AppAction): AppState {
             return { ...state, routes: newRoutes };
         }
 
+        case 'ISOLATE_ROUTE': {
+            const isolateId = action.payload;
+            const updatedRoutes = { ...state.routes };
+
+            // Check if this route is currently the ONLY visible route
+            const activeRoutes = Object.values(updatedRoutes).filter(r => r.serviceMode === state.activeServiceMode);
+            const isCurrentlyIsolated = activeRoutes.every(r => (r.id === isolateId ? r.visible : !r.visible));
+
+            for (const route of activeRoutes) {
+                // If it's already isolated, toggle everything back to visible. Otherwise, isolate it.
+                updatedRoutes[route.id] = { ...route, visible: isCurrentlyIsolated ? true : route.id === isolateId };
+            }
+            return { ...state, routes: updatedRoutes, selectedRouteId: isCurrentlyIsolated ? null : isolateId };
+        }
+
+        case 'ISOLATE_VEHICLE_ROUTES': {
+            const vehicleId = action.payload;
+            const updatedRoutes = { ...state.routes };
+
+            // Check if ONLY this vehicle's routes are visible
+            const activeRoutes = Object.values(updatedRoutes).filter(r => r.serviceMode === state.activeServiceMode);
+            const isCurrentlyIsolated = activeRoutes.every(r => (r.vehicleId === vehicleId ? r.visible : !r.visible));
+
+            for (const route of activeRoutes) {
+                // If already isolated, show all. Otherwise, isolate this vehicle.
+                updatedRoutes[route.id] = { ...route, visible: isCurrentlyIsolated ? true : route.vehicleId === vehicleId };
+            }
+            return { ...state, routes: updatedRoutes };
+        }
+
         case 'BATCH_ASSIGN_STOPS': {
             const batchRoutes = { ...state.routes };
             const batchStops = { ...state.stops };
@@ -593,7 +629,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             }
         }, 500);
         return () => clearTimeout(timeout);
-    }, [state.stops, state.routes, state.vehicles, state.settings, state.stopOrder]);
+    }, [state.stops, state.routes, state.vehicles, state.settings, state.stopOrder, state.activeServiceMode]);
 
     return (
         <AppStateContext.Provider value={state}>

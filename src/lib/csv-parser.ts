@@ -1,8 +1,6 @@
 import Papa from 'papaparse';
 import type { RawCSVRow, ParsedLineItem, DeliveryStop, MulchOrder, SpreadingOrder, MulchType } from './types';
 
-const MULCH_TYPES: MulchType[] = ['Black', 'Aromatic Cedar', 'Fine Shredded Hardwood'];
-
 /**
  * Extract "Scout to credit" from Item Modifiers string.
  * Pattern: "1 x Scout name to credit ...: <ScoutName>"
@@ -94,7 +92,7 @@ export function parseCSV(csvString: string): { raw: RawCSVRow[]; lineItems: Pars
  * Aggregate line items into delivery stops grouped by recipient address.
  * Uses address + postal code as the grouping key since Order Name is actually recipient name.
  */
-export function aggregateStops(lineItems: ParsedLineItem[]): { stops: Record<string, DeliveryStop>; stopOrder: string[] } {
+export function aggregateStops(lineItems: ParsedLineItem[], activeMulchTypes: string[]): { stops: Record<string, DeliveryStop>; stopOrder: string[] } {
     const stopMap = new Map<string, ParsedLineItem[]>();
 
     for (const item of lineItems) {
@@ -120,7 +118,7 @@ export function aggregateStops(lineItems: ParsedLineItem[]): { stops: Record<str
 
         // Separate mulch orders from spreading
         const mulchItems = items.filter(
-            (i) => i.itemName === 'Jemasco Mulch' && MULCH_TYPES.includes(i.itemVariation as MulchType)
+            (i) => i.itemName === 'Jemasco Mulch' && activeMulchTypes.includes(i.itemVariation)
         );
         const spreadingItems = items.filter((i) => i.itemName === 'Spreading');
 

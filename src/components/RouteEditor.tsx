@@ -37,7 +37,6 @@ import { exportRoutesToCSV, downloadCSV, exportRoutesToPDF } from '@/src/lib/rou
 import { computeRouteETAs } from '@/src/lib/eta-calculator';
 import type { MulchType, DeliveryStop, Route } from '@/src/lib/types';
 
-const MULCH_TYPES: MulchType[] = ['Black', 'Aromatic Cedar', 'Fine Shredded Hardwood'];
 
 type StopMetric = 'bags' | 'mulchType' | 'scout' | 'orderDate' | 'orderId' | 'phone' | 'email' | 'notes';
 
@@ -90,7 +89,9 @@ export function RouteEditor() {
     const [collapsedRoutes, setCollapsedRoutes] = useState<Record<string, boolean>>({});
 
     // Smart auto-gen state
-    const vehicles = Object.values(state.vehicles).filter(v => v.serviceMode === state.activeServiceMode);
+    const vehicles = useMemo(() => {
+        return Object.values(state.vehicles).filter(v => v.serviceMode === state.activeServiceMode);
+    }, [state.vehicles, state.activeServiceMode]);
     const [vehicleAssignments, setVehicleAssignments] = useState<
         { vehicleId: string; mulchType: string }[]
     >([]);
@@ -107,7 +108,7 @@ export function RouteEditor() {
         if (showAutoGen && vehicles.length > 0 && vehicleAssignments.length === 0) {
             const initial = vehicles.map((v, i) => ({
                 vehicleId: v.id,
-                mulchType: state.activeServiceMode === 'spreading' ? '' : (i < MULCH_TYPES.length ? MULCH_TYPES[i] : ''),
+                mulchType: state.activeServiceMode === 'spreading' ? '' : (i < (state.settings.mulchTypes || []).length ? state.settings.mulchTypes[i] : ''),
             }));
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setVehicleAssignments(initial);
@@ -118,20 +119,25 @@ export function RouteEditor() {
     const [newRouteVehicle, setNewRouteVehicle] = useState('');
     const [newRouteMulchType, setNewRouteMulchType] = useState<string>('');
 
-    const allRoutes = Object.values(state.routes).filter(r => r.serviceMode === state.activeServiceMode);
-    const unassignedStops = state.stopOrder
-        .map(id => state.stops[id])
-        .filter(s => {
-            if (!s || s.isDisabled) return false;
-            if (state.activeServiceMode === 'mulch') {
-                if (s.routeId) return false;
-                if (!s.mulchOrders || s.mulchOrders.length === 0) return false;
-            } else if (state.activeServiceMode === 'spreading') {
-                if (s.spreadingRouteId) return false;
-                if (!s.spreadingOrder) return false;
-            }
-            return true;
-        });
+    const allRoutes = useMemo(() => {
+        return Object.values(state.routes).filter(r => r.serviceMode === state.activeServiceMode);
+    }, [state.routes, state.activeServiceMode]);
+
+    const unassignedStops = useMemo(() => {
+        return state.stopOrder
+            .map(id => state.stops[id])
+            .filter(s => {
+                if (!s || s.isDisabled) return false;
+                if (state.activeServiceMode === 'mulch') {
+                    if (s.routeId) return false;
+                    if (!s.mulchOrders || s.mulchOrders.length === 0) return false;
+                } else if (state.activeServiceMode === 'spreading') {
+                    if (s.spreadingRouteId) return false;
+                    if (!s.spreadingOrder) return false;
+                }
+                return true;
+            });
+    }, [state.stopOrder, state.stops, state.activeServiceMode]);
 
     // Sort routes by vehicle
     const sortedRoutes = useMemo(() => {
@@ -148,10 +154,10 @@ export function RouteEditor() {
 
     // Pre-compute ETA maps for all routes at component level (avoids hooks-in-render violation)
     const routeETAMaps = useMemo(() => {
-        const maps: Record<string, Map<string, ReturnType<typeof computeRouteETAs>[0]>> = {};
+        const maps: Record<string, Map<string, ReturnType<typeof computeRouteETAs>['stops'][0]>> = {};
         for (const route of allRoutes) {
             if (route.legStats) {
-                maps[route.id] = new Map(computeRouteETAs(route, state).map(e => [e.stopId, e]));
+                maps[route.id] = new Map(computeRouteETAs(route, state).stops.map(e => [e.stopId, e]));
             } else {
                 maps[route.id] = new Map();
             }
@@ -191,7 +197,7 @@ export function RouteEditor() {
         // Build delivery ETAs: stopId → absolute minutes from deliveryDate 00:00
         const deliveryAbsoluteETA = new Map<string, number>();
         for (const dRoute of deliveryRoutes) {
-            for (const eta of computeRouteETAs(dRoute, state)) {
+            for (const eta of computeRouteETAs(dRoute, state).stops) {
                 deliveryAbsoluteETA.set(eta.stopId, eta.absoluteMins);
             }
         }
@@ -199,7 +205,7 @@ export function RouteEditor() {
         for (const sRoute of spreadingRoutes) {
             const sVehicle = state.vehicles[sRoute.vehicleId];
             const sVehicleName = sVehicle?.name || 'Unknown Vehicle';
-            const spreadingETAs = computeRouteETAs(sRoute, state);
+            const spreadingETAs = computeRouteETAs(sRoute, state).stops;
             for (const eta of spreadingETAs) {
                 const deliveryAbsMins = deliveryAbsoluteETA.get(eta.stopId);
                 if (deliveryAbsMins !== undefined && eta.absoluteMins < deliveryAbsMins) {
@@ -212,7 +218,7 @@ export function RouteEditor() {
             }
         }
         return warnings;
-    }, [state, state.activeServiceMode]);
+    }, [state.routes, state.stops, state.settings, state.activeServiceMode]);
 
     const handleDragEnd = (result: DropResult) => {
         const { source, destination, draggableId } = result;
@@ -248,8 +254,8 @@ export function RouteEditor() {
 
         try {
             const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
-            // overview=full returns geometry; overview=false only returns stats
-            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${coordsStr}?access_token=${token}&geometries=geojson&overview=full`;
+            // overview=full returns geometry; overview=false only returns stats. steps=true returns step geometries
+            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${coordsStr}?access_token=${token}&geometries=geojson&overview=full&steps=true`;
             const resp = await fetch(url);
             if (!resp.ok) return;
             const data = await resp.json();
@@ -257,10 +263,23 @@ export function RouteEditor() {
                 const distanceMiles = data.routes[0].distance * 0.000621371;
                 const durationMinutes = data.routes[0].duration / 60;
 
-                const legStats = data.routes[0].legs.map((leg: { distance: number; duration: number }) => ({
-                    distanceMiles: leg.distance * 0.000621371,
-                    durationMinutes: leg.duration / 60
-                }));
+                const legStats = data.routes[0].legs.map((leg: { distance: number; duration: number; steps?: { geometry?: { coordinates?: [number, number][] } }[] }) => {
+                    const coords: [number, number][] = [];
+                    if (leg.steps) {
+                        leg.steps.forEach((step) => {
+                            if (step.geometry && step.geometry.coordinates) {
+                                step.geometry.coordinates.forEach((c: [number, number], idx: number) => {
+                                    if (coords.length === 0 || idx > 0) coords.push(c);
+                                });
+                            }
+                        });
+                    }
+                    return {
+                        distanceMiles: leg.distance * 0.000621371,
+                        durationMinutes: leg.duration / 60,
+                        geometry: coords.length > 0 ? { type: 'LineString', coordinates: coords } : undefined
+                    };
+                });
 
                 dispatch({ type: 'SET_ROUTE_STATS', payload: { routeId, distanceMiles, durationMinutes, legStats } });
 
@@ -380,7 +399,7 @@ export function RouteEditor() {
         }, 0);
         const isSelected = state.selectedRouteId === route.id;
         // Use pre-computed ETA map from component level
-        const etaMap = routeETAMaps[route.id] ?? new Map<string, ReturnType<typeof computeRouteETAs>[0]>();
+        const etaMap = routeETAMaps[route.id] ?? new Map<string, ReturnType<typeof computeRouteETAs>['stops'][0]>();
 
         return (
             <div
@@ -412,6 +431,13 @@ export function RouteEditor() {
                     </div>
                     <div className="route-card-actions" onClick={e => e.stopPropagation()}>
                         <button onClick={() => setCollapsedRoutes(prev => ({ ...prev, [route.id]: prev[route.id] !== undefined ? !prev[route.id] : false }))} className="btn btn-xs btn-ghost" title="Toggle stops">{collapsedRoutes[route.id] !== false ? 'Expand' : 'Collapse'}</button>
+                        <button
+                            onClick={() => dispatch({ type: 'ISOLATE_ROUTE', payload: route.id })}
+                            className={`btn btn-xs ${allRoutes.every(r => r.id === route.id ? r.visible : !r.visible) ? 'btn-primary' : 'btn-ghost'}`}
+                            title="Focus/Show Only Mode"
+                        >
+                            <Eye size={14} style={{ marginRight: 2 }} /> Only
+                        </button>
                         <button onClick={() => handleExportCSV([route.id])} className="btn btn-xs btn-ghost" title="Export CSV"><Download size={12} /></button>
                         <button onClick={() => handleExportPDF([route.id])} className="btn btn-xs btn-ghost" title="Print/PDF"><FileText size={12} /></button>
                         <button onClick={() => dispatch({ type: 'TOGGLE_ROUTE_VISIBILITY', payload: route.id })} className="btn btn-xs btn-ghost" title={route.visible ? 'Hide' : 'Show'}>
@@ -646,7 +672,7 @@ export function RouteEditor() {
                                     {state.activeServiceMode !== 'spreading' && (
                                         <select value={a.mulchType} onChange={(e) => { const u = [...vehicleAssignments]; u[i] = { ...u[i], mulchType: e.target.value }; setVehicleAssignments(u); }} className="input input-sm" style={{ minWidth: 140 }}>
                                             <option value="">🔥 Hotshot (any)</option>
-                                            {MULCH_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                            {(state.settings.mulchTypes || []).map(t => <option key={t} value={t}>{t}</option>)}
                                         </select>
                                     )}
                                 </div>
@@ -683,7 +709,7 @@ export function RouteEditor() {
                                 <label className="form-label">Mulch Lock</label>
                                 <select value={newRouteMulchType} onChange={(e) => setNewRouteMulchType(e.target.value)} className="input input-sm">
                                     <option value="">Any</option>
-                                    {MULCH_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                    {(state.settings.mulchTypes || []).map(t => <option key={t} value={t}>{t}</option>)}
                                 </select>
                             </div>
                         )}
@@ -700,6 +726,16 @@ export function RouteEditor() {
                 {sortBy === 'vehicle' && routesByVehicle ? (
                     routesByVehicle.map(group => (
                         <div key={group.vehicleId} className="vehicle-group">
+                            <div className="vehicle-group-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', paddingBottom: '4px', borderBottom: '1px solid var(--border)' }}>
+                                <span style={{ fontWeight: 600, fontSize: 13 }}>{group.vehicleName} ({group.routes.length})</span>
+                                <button
+                                    onClick={() => dispatch({ type: 'ISOLATE_VEHICLE_ROUTES', payload: group.vehicleId })}
+                                    className={`btn btn-xs ${allRoutes.every(r => r.vehicleId === group.vehicleId ? r.visible : !r.visible) ? 'btn-primary' : 'btn-ghost'}`}
+                                    title="Show only routes for this vehicle"
+                                >
+                                    <Eye size={14} style={{ marginRight: 4 }} /> Show Only
+                                </button>
+                            </div>
                             {group.routes.map(route => renderRouteCard(route))}
                         </div>
                     ))
